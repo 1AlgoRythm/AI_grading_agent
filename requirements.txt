@@ -1,0 +1,13 @@
+# Day-one dependencies (contracts, fixtures, skeleton, tests)
+pydantic>=2.6
+pytest>=8.0
+
+# Added per lane as real implementations land (uncomment when needed):
+# fastapi           # P3 — API
+# uvicorn           # P3 — server
+# sqlalchemy        # all — Postgres models
+# psycopg[binary]   # all — Postgres driver
+# sympy             # P2 — math verification tool
+# streamlit         # P1/P2/P3 — UI panels
+# chromadb          # P1 — vector store (only if a textbook corpus is used)
+# anthropic         # BYOK provider (or openai / google-generativeai)
