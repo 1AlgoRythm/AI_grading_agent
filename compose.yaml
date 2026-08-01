@@ -1,0 +1,29 @@
+services:
+  app:
+    build: .
+    ports:
+      - "8501:8501"
+    environment:
+      DATABASE_URL: postgresql+psycopg://grading:grading@db:5432/grading
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: grading
+      POSTGRES_USER: grading
+      POSTGRES_PASSWORD: grading
+    volumes:
+      - grading_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U grading -d grading"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+volumes:
+  grading_data:

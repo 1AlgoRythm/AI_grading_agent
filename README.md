@@ -47,6 +47,37 @@ The current screen uses the shared fixtures so it remains usable while P1 and
 P2 replace their stubs. It demonstrates score overrides, required audit reasons,
 final approval, student follow-up explanations, and label-free metrics.
 
+Override audits are stored in `p3_demo.db` by default. Set `DATABASE_URL` to a
+SQLAlchemy PostgreSQL URL to use Postgres instead.
+
+## Run with Docker Compose
+
+Docker Compose starts the Streamlit application and PostgreSQL:
+
+```bash
+docker compose up --build
+```
+
+Open <http://localhost:8501>. The database is health-checked before the app
+starts and its records are retained in the `grading_data` volume. Stop the stack
+with `docker compose down`; add `--volumes` only when you intentionally want to
+remove stored audit and evaluation data.
+
+## Configuration and BYOK
+
+Copy `.env.example` to `.env` for local configuration. Never commit `.env` or an
+API key. The shared model-provider integration will consume `MODEL_PROVIDER`,
+`MODEL_NAME`, and `MODEL_API_KEY`; current P3 feedback is deterministic and does
+not require a paid model.
+
+## P3 evaluation limitations
+
+The evaluation report contains label-free indicators: answer-match rate,
+evidence-grounding rate, critic agreement, repeated-run score variance, latency,
+and token usage. These signals do **not** prove grading accuracy because the
+project does not yet have a human-graded golden dataset. Human overrides are
+recorded so the team can build that dataset over time.
+
 ## How to work in parallel
 
 1. **Together first:** read `contracts.py`, run the three commands above, and
