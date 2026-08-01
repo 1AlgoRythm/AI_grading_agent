@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Protocol
 from uuid import UUID, uuid4
 
 from contracts import ArtifactStatus, Grade, GradeResolution, ProblemOutcome, now, round_to_step
@@ -19,6 +20,10 @@ class OverrideAuditEntry:
     new_points: float
     reason: str
     created_at: datetime
+
+
+class AuditLog(Protocol):
+    def append(self, entry: OverrideAuditEntry) -> None: ...
 
 
 class InMemoryAuditLog:
@@ -40,7 +45,7 @@ def override_problem_score(
     points_awarded: float,
     approver_id: str,
     reason: str,
-    audit_log: InMemoryAuditLog,
+    audit_log: AuditLog,
 ) -> Grade:
     """Apply a justified human override and record before/after values."""
     approver_id, reason = approver_id.strip(), reason.strip()

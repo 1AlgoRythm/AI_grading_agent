@@ -3,10 +3,11 @@
 import pytest
 
 import fixtures as f
-from contracts import ArtifactStatus, GradeResolution, ProblemGrade, ProblemOutcome
+from contracts import ArtifactStatus, GradeResolution, ProblemGrade, ProblemOutcome, now
 from lanes.p3_evaluation import evaluate_runs
 from lanes.p3_feedback import answer_followup, clear_feedback_contexts, generate_feedback, register_feedback_context
 from lanes.p3_review import InMemoryAuditLog, finalize, override_problem_score
+from lanes.p3_storage import P3Store
 
 
 def test_feedback_is_grounded_in_score_rubric_and_evidence():
@@ -79,3 +80,19 @@ def test_label_free_evaluation_report():
     assert report.score_standard_deviation == 0.0
     assert report.average_latency_ms == 5200
     assert report.average_tokens_used == 1840
+
+
+def test_database_store_persists_audits_and_evaluations(tmp_path):
+    store = P3Store(f"sqlite:///{tmp_path / 'p3.db'}")
+    grade = f.sample_grade()
+    override_problem_score(
+        grade, f.Q2, 3, "instructor_1", "Accepted equivalent work", store
+    )
+    entries = store.for_grade(grade.id)
+    assert len(entries) == 1
+    assert entries[0].new_points == 3
+
+    report = evaluate_runs([(grade, f.sample_trace())])
+    run_id = store.save_evaluation(report, now())
+    assert run_id == 1
+    assert store.evaluation_runs() == [report]
