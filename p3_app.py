@@ -5,13 +5,16 @@ Run with: ``streamlit run p3_app.py``
 
 from __future__ import annotations
 
+import os
+
 import streamlit as st
 
 import fixtures
 from contracts import ArtifactStatus
 from lanes.p3_evaluation import evaluate_runs
 from lanes.p3_feedback import answer_followup, generate_feedback, register_feedback_context
-from lanes.p3_review import InMemoryAuditLog, finalize, override_problem_score
+from lanes.p3_review import finalize, override_problem_score
+from lanes.p3_storage import P3Store
 
 
 def _initialize_demo() -> None:
@@ -19,7 +22,9 @@ def _initialize_demo() -> None:
         st.session_state.grade = fixtures.sample_grade()
         st.session_state.rubric = fixtures.sample_rubric()
         st.session_state.trace = fixtures.sample_trace()
-        st.session_state.audit_log = InMemoryAuditLog()
+        st.session_state.audit_log = P3Store(
+            os.getenv("DATABASE_URL", "sqlite:///p3_demo.db")
+        )
         st.session_state.chat = []
 
 
