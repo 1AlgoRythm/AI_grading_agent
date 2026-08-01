@@ -35,6 +35,18 @@ If `python skeleton.py` prints the eight stages and ends with "end-to-end path
 executed", the three lanes connect. That is the foundation everything else is
 built on.
 
+## P3 review demo
+
+Run the human-review, grounded-feedback, audit, and evaluation interface:
+
+```bash
+streamlit run p3_app.py
+```
+
+The current screen uses the shared fixtures so it remains usable while P1 and
+P2 replace their stubs. It demonstrates score overrides, required audit reasons,
+final approval, student follow-up explanations, and label-free metrics.
+
 ## How to work in parallel
 
 1. **Together first:** read `contracts.py`, run the three commands above, and
