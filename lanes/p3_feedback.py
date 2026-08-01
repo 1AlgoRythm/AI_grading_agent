@@ -27,7 +27,7 @@ def _criterion_summary(grade: ProblemGrade, rubric: Rubric) -> str:
     if not criteria:
         return "the requirements for this problem"
     return "; ".join(
-        f"{_clean(item.name)}: {_clean(item.description)}" for item in criteria
+        f"{_clean(item.name)}: {_clean(item.description).rstrip('.')}" for item in criteria
     )
 
 
