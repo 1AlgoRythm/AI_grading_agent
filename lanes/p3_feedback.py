@@ -1,56 +1,115 @@
-"""[P3] Feedback, human review & evaluation.
-
-SKELETON stubs: feedback is a plain template built from the grade's evidence; the
-chat is a placeholder; finalize performs the human approval action. Replace the
-feedback/chat bodies with grounded generation and agentic RAG.
-"""
+"""[P3] Grounded feedback and student follow-up explanations."""
 
 from __future__ import annotations
 
+import re
+from dataclasses import dataclass
 from uuid import UUID
 
-from contracts import ArtifactStatus, Grade, GradeResolution, Rubric, now
+from contracts import Grade, ProblemGrade, ProblemOutcome, Rubric
+from lanes.p3_review import finalize
+
+__all__ = [
+    "answer_followup",
+    "clear_feedback_contexts",
+    "finalize",
+    "generate_feedback",
+    "register_feedback_context",
+]
 
 
-def generate_feedback(grade: Grade, rubric: Rubric) -> dict[UUID, str]:
-    """SKELETON: template feedback per problem from the grade evidence. Real P3
-    generates grounded, student-facing explanations."""
-    feedback: dict[UUID, str] = {}
-    for pg in grade.problem_grades:
-        criteria = rubric.for_problem(pg.problem_id)
-        name = criteria[0].name if criteria else "This problem"
-        if pg.outcome is not pg.outcome.GRADED:
-            feedback[pg.problem_id] = f"{name}: {pg.outcome.value.replace('_', ' ')}."
-        elif pg.points_awarded == pg.points_possible:
-            feedback[pg.problem_id] = (
-                f"{name}: full marks ({pg.points_awarded}/{pg.points_possible}). {pg.evidence}"
-            )
-        else:
-            feedback[pg.problem_id] = (
-                f"{name}: {pg.points_awarded}/{pg.points_possible}. {pg.partial_credit_reason}"
-            )
-    return feedback
+def _clean(text: str | None) -> str:
+    return re.sub(r"\s+", " ", text or "").strip()
 
 
-def answer_followup(question: str, submission_id: UUID) -> str:
-    """SKELETON: placeholder chat reply. Real P3 does agentic RAG over the
-    submission, rubric, and grade (and may cite the textbook)."""
-    return (
-        "[skeleton feedback chat] Once implemented, I'll explain any problem's "
-        f"score for submission {submission_id.hex[-4:]}. You asked: {question!r}"
+def _criterion_summary(grade: ProblemGrade, rubric: Rubric) -> str:
+    criteria = rubric.for_problem(grade.problem_id)
+    if not criteria:
+        return "the requirements for this problem"
+    return "; ".join(
+        f"{_clean(item.name)}: {_clean(item.description)}" for item in criteria
     )
 
 
-def finalize(grade: Grade, approver_id: str) -> Grade:
-    """Human review action: approve the grade. (An override would edit the
-    problem scores first, then set resolution=HUMAN_OVERRIDDEN.)
+def _feedback_for_problem(problem_grade: ProblemGrade, rubric: Rubric) -> str:
+    score = f"{problem_grade.points_awarded:g}/{problem_grade.points_possible:g}"
+    criterion = _criterion_summary(problem_grade, rubric)
+    evidence = _clean(problem_grade.evidence)
 
-    Order matters: the 'approved grade needs an approver' rule re-runs on every
-    field assignment (validate_assignment=True), so set approver_id FIRST and
-    flip status to APPROVED LAST — once its precondition is already in place.
-    """
-    grade.approver_id = approver_id
-    grade.resolution = GradeResolution.HUMAN_CONFIRMED
-    grade.approved_at = now()
-    grade.status = ArtifactStatus.APPROVED   # set LAST, after approver_id exists
-    return grade
+    if problem_grade.outcome is ProblemOutcome.NO_ANSWER:
+        return f"Score: {score}. No answer was provided. Review {criterion}."
+    if problem_grade.outcome is ProblemOutcome.UNGRADEABLE:
+        return (
+            f"Score: {score}. The submitted response could not be graded. "
+            f"Please ask the instructor to review it. Relevant rubric: {criterion}."
+        )
+
+    if problem_grade.points_awarded == problem_grade.points_possible:
+        result = f"Full credit. Your work met {criterion}."
+        action = " Keep using this approach and show the key steps clearly."
+    else:
+        reason = _clean(problem_grade.partial_credit_reason)
+        result = f"Partial credit. {reason or 'The response met only part of the rubric.'}"
+        action = f" Next step: compare your work with {criterion}."
+
+    evidence_sentence = f" Evidence: {evidence}" if evidence else ""
+    return f"Score: {score}. {result}{evidence_sentence}{action}"
+
+
+def generate_feedback(grade: Grade, rubric: Rubric) -> dict[UUID, str]:
+    """Produce one rubric- and evidence-grounded explanation per problem."""
+    if grade.assignment_id != rubric.assignment_id:
+        raise ValueError("grade and rubric must belong to the same assignment")
+    return {
+        item.problem_id: _feedback_for_problem(item, rubric)
+        for item in grade.problem_grades
+    }
+
+
+@dataclass(frozen=True)
+class FeedbackContext:
+    grade: Grade
+    rubric: Rubric
+
+
+_FEEDBACK_CONTEXTS: dict[UUID, FeedbackContext] = {}
+
+
+def register_feedback_context(grade: Grade, rubric: Rubric) -> None:
+    """Register grounded context for the contract's submission-id chat seam."""
+    if grade.assignment_id != rubric.assignment_id:
+        raise ValueError("grade and rubric must belong to the same assignment")
+    _FEEDBACK_CONTEXTS[grade.submission_id] = FeedbackContext(
+        grade=grade.model_copy(deep=True), rubric=rubric.model_copy(deep=True)
+    )
+
+
+def clear_feedback_contexts() -> None:
+    _FEEDBACK_CONTEXTS.clear()
+
+
+def answer_followup(question: str, submission_id: UUID) -> str:
+    """Answer only from registered grade/rubric context."""
+    question = _clean(question)
+    if not question:
+        raise ValueError("question must not be blank")
+    context = _FEEDBACK_CONTEXTS.get(submission_id)
+    if context is None:
+        return (
+            "I can’t answer that yet because the approved grade and rubric are "
+            "not available for this submission. Please ask the instructor."
+        )
+
+    feedback = generate_feedback(context.grade, context.rubric)
+    lowered = question.lower()
+    selected = [
+        (problem_id, text)
+        for problem_id, text in feedback.items()
+        if str(problem_id).lower() in lowered or problem_id.hex[-2:] in lowered
+    ]
+    if not selected:
+        selected = list(feedback.items())
+    explanations = " ".join(
+        f"Problem {problem_id.hex[-2:]} — {text}" for problem_id, text in selected
+    )
+    return f"Based on the approved rubric and recorded grading evidence: {explanations}"
