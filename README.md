@@ -50,6 +50,13 @@ final approval, student follow-up explanations, and label-free metrics.
 Override audits are stored in `p3_demo.db` by default. Set `DATABASE_URL` to a
 SQLAlchemy PostgreSQL URL to use Postgres instead.
 
+## P1 to P2 handoff
+
+P1 is responsible for assignment parsing, textbook retrieval, model solution
+and rubric drafting, and building the budget-checked `GradingContext` objects
+that P2 consumes directly. P2 should treat the P1 context as the canonical
+input for grading and should not need to re-derive the assignment structure.
+
 ## Run with Docker Compose
 
 Docker Compose starts the Streamlit application and PostgreSQL:
