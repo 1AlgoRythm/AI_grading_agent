@@ -180,6 +180,28 @@ class P1Store:
             ],
         )
 
+    def load_rubric_for_assignment(self, assignment_id: UUID) -> Optional[Rubric]:
+        """Look up a rubric by assignment rather than by its own id -- the
+        lookup P3 actually has on hand (an assignment, not a rubric_id).
+        Prefers the approved rubric; falls back to the latest version if
+        none is approved yet."""
+        with Session(self.engine) as session:
+            record = session.scalars(
+                select(RubricRecord)
+                .where(
+                    RubricRecord.assignment_id == str(assignment_id),
+                    RubricRecord.status == ArtifactStatus.APPROVED.value,
+                )
+                .order_by(RubricRecord.version.desc())
+            ).first()
+            if record is None:
+                record = session.scalars(
+                    select(RubricRecord)
+                    .where(RubricRecord.assignment_id == str(assignment_id))
+                    .order_by(RubricRecord.version.desc())
+                ).first()
+        return self.load_rubric(UUID(record.id)) if record else None
+
     # ---- textbook index -------------------------------------------- #
 
     def index_textbook_chunks(self, source_path: str, chunks: list[str]) -> None:

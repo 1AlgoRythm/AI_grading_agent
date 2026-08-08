@@ -60,7 +60,9 @@ Upload (or paste) an assignment, develop and review a proposed solution per
 problem (with `verify_solution`'s self-consistency/substitution check shown
 inline), then draft and edit the rubric. A sidebar button syncs the on-disk
 `textbook/` corpus into the `textbook_index` table. Everything persists via
-`P1Store` (`p1_demo.db` by default; set `P1_DATABASE_URL` for Postgres) so an
+`P1Store` (`p1_demo.db` by default; set `DATABASE_URL` for Postgres -- the
+same variable P2 and P3's apps use, so all three point at one shared
+database) so an
 in-progress review survives a restart.
 
 ### P2 grade + trace review demo

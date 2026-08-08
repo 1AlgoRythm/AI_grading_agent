@@ -44,7 +44,7 @@ def _initialize_demo() -> None:
         context = fixtures.sample_submission_context()
         grade, trace = p2.grade(submission, rubric, context)
 
-        st.session_state.p2_store = P2Store(os.getenv("DATABASE_URL", "sqlite:///p2_demo.db"))
+        st.session_state.p2_store = P2Store(os.getenv("DATABASE_URL", "sqlite:///grading_demo.db"))
         st.session_state.p2_store.save(grade, trace)
         st.session_state.p2_grade = grade
         st.session_state.p2_trace = trace

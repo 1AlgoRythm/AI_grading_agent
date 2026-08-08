@@ -136,6 +136,17 @@ class P2Store:
             ).all()
         return [Grade.model_validate_json(record.payload_json) for record in records]
 
+    def grades_for_assignment(self, assignment_id: UUID) -> list[Grade]:
+        """List every graded submission for an assignment -- the lookup a
+        reviewer needs when they only know the assignment, not a specific
+        submission_id (e.g. P3's review app picking which submission to
+        open)."""
+        with Session(self.engine) as session:
+            records = session.scalars(
+                select(GradeRecord).where(GradeRecord.assignment_id == str(assignment_id))
+            ).all()
+        return [Grade.model_validate_json(record.payload_json) for record in records]
+
     def critic_results_for(self, grade_id: UUID) -> list[CriticResultRecord]:
         with Session(self.engine) as session:
             return list(session.scalars(

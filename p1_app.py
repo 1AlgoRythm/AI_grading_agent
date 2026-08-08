@@ -1,4 +1,5 @@
-"""Streamlit demo for P1 ingestion, solution review, and rubric editing.
+"""Streamlit demo for P1 ingestion, solution review, rubric editing, and the
+handoff into P2 grading.
 
 Run with: ``streamlit run p1_app.py``
 
@@ -8,6 +9,12 @@ functions ran only from `skeleton.py`/tests, with no interface for a human to
 actually upload an assignment or approve a solution/rubric. Everything here
 persists through `P1Store` so an in-progress review survives a page refresh
 or a restart, not just one Python process.
+
+The submission-upload section below is the other half of "connect P1's real
+uploads to P2": it ingests a real submission, builds the budget-checked
+`SubmissionContext`, hands both to P2's `grade()`, and persists the result
+through `P2Store` -- all on the same shared `DATABASE_URL` P1/P2/P3 use, so
+p2_app.py and p3_app.py can pick the resulting grade straight up.
 """
 from __future__ import annotations
 
@@ -20,13 +27,21 @@ import streamlit as st
 from contracts import ArtifactStatus
 from lanes import p1_ingestion as p1
 from lanes import p1_rag
+from lanes import p2_grading as p2
 from lanes.p1_storage import P1Store
+from lanes.p2_storage import P2Store
 
 
 def _get_store() -> P1Store:
     if "p1_store" not in st.session_state:
-        st.session_state.p1_store = P1Store(os.getenv("P1_DATABASE_URL", "sqlite:///p1_demo.db"))
+        st.session_state.p1_store = P1Store(os.getenv("DATABASE_URL", "sqlite:///grading_demo.db"))
     return st.session_state.p1_store
+
+
+def _get_p2_store() -> P2Store:
+    if "p2_store" not in st.session_state:
+        st.session_state.p2_store = P2Store(os.getenv("DATABASE_URL", "sqlite:///grading_demo.db"))
+    return st.session_state.p2_store
 
 
 def _init_state() -> None:
@@ -171,12 +186,67 @@ def _render_rubric_editor(store: P1Store) -> None:
             st.rerun()
 
 
+def _render_submission_and_grading(p2_store: P2Store) -> None:
+    """The other half of the P1 -> P2 handoff: ingest a real submission,
+    build its budget-checked context, hand both to P2's grade(), and persist
+    the result via P2Store -- so p2_app.py/p3_app.py can pick it straight up
+    by assignment_id/submission_id, instead of only ever seeing fixtures."""
+    assignment = st.session_state.assignment
+    rubric = st.session_state.rubric
+    st.header("4. Upload a submission & grade it")
+    if rubric is None or rubric.status is not ArtifactStatus.APPROVED:
+        st.info("Approve the rubric above before grading a submission.")
+        return
+
+    uploaded = st.file_uploader(
+        "Submission file (.txt, .md, .ipynb, .pdf)", type=["txt", "md", "ipynb", "pdf"], key="submission-file",
+    )
+    pasted = st.text_area("...or paste the submission text directly", height=150, key="submission-text")
+
+    if st.button("Ingest & grade submission", disabled=not (uploaded or pasted.strip())):
+        if uploaded is not None:
+            suffix = Path(uploaded.name).suffix or ".txt"
+            with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp_file:
+                tmp_file.write(uploaded.getvalue())
+                source = tmp_file.name
+        else:
+            source = pasted
+        submission = p1.ingest_submission(source, assignment=assignment)
+        context = p1.build_submission_context(assignment, submission, rubric)
+        grade, trace = p2.grade(submission, rubric, context)
+        p2_store.save(grade, trace)
+        st.session_state.last_grade = (submission, grade, trace)
+        st.success(
+            f"Graded '{submission.student_label}': {grade.total_awarded:g}/{grade.total_possible:g} "
+            f"({grade.fraction:.0%}). Persisted grade {grade.id} for submission {submission.id}."
+        )
+        st.rerun()
+
+    last = st.session_state.get("last_grade")
+    if last is not None:
+        submission, grade, trace = last
+        st.subheader(f"Last graded: {submission.student_label}")
+        st.write(
+            f"**Total:** {grade.total_awarded:g}/{grade.total_possible:g} · "
+            f"**Status:** {grade.status.value} · **Escalated:** {grade.escalated} · "
+            f"**Trace:** stop={trace.stop_reason.value}, revisions={trace.num_revisions}"
+        )
+        st.caption(f"grade_id={grade.id} · submission_id={submission.id} · open this in p2_app.py / p3_app.py")
+
+    history = p2_store.grades_for_assignment(assignment.id)
+    if history:
+        st.subheader(f"Previously graded submissions for '{assignment.label}'")
+        for g in history:
+            st.write(f"- submission {g.submission_id}: grade {g.id} — {g.total_awarded:g}/{g.total_possible:g}")
+
+
 def main() -> None:
     st.set_page_config(page_title="AI Grading Agent — P1 Ingestion & Rubric", layout="wide")
     st.title("AI Grading Agent")
     st.caption("P1 — ingestion, retrieval, solution development, and rubric drafting")
 
     store = _get_store()
+    p2_store = _get_p2_store()
     _init_state()
 
     with st.sidebar:
@@ -190,6 +260,7 @@ def main() -> None:
     if st.session_state.assignment is not None:
         _render_solution_review(store)
         _render_rubric_editor(store)
+        _render_submission_and_grading(p2_store)
 
 
 if __name__ == "__main__":

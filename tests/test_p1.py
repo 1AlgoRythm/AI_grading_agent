@@ -81,6 +81,40 @@ def test_ingest_submission_sanitizes_text(tmp_path, monkeypatch):
     assert "system:" not in submission.answers[0].work_text.lower()
 
 
+def test_ingest_submission_answer_count_matches_detected_blocks_not_the_fixture(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    path = tmp_path / "student.txt"
+    path.write_text(
+        "Problem 1\nWork: a\nFinal answer: 1\n\n"
+        "Problem 2\nWork: b\nFinal answer: 2\n\n"
+        "Problem 3\nWork: c\nFinal answer: 3",
+        encoding="utf8",
+    )
+
+    submission = p1_io.ingest_submission(str(path))
+
+    assert len(submission.answers) == 3  # a 3-problem submission, not the fixture's fixed 2
+    assert [a.final_answer for a in submission.answers] == ["1", "2", "3"]
+
+
+def test_ingest_submission_maps_answers_to_the_real_assignment_by_label(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    assignment = Assignment(label="hw", title="HW", type="math")
+    q1 = Problem(assignment_id=assignment.id, label="Q1", statement="s1", points_possible=5)
+    q2 = Problem(assignment_id=assignment.id, label="Q2", statement="s2", points_possible=5)
+    assignment.problems = [q1, q2]
+
+    path = tmp_path / "student.txt"
+    path.write_text("Problem 2\nWork: b\nFinal answer: 2\n\nProblem 1\nWork: a\nFinal answer: 1", encoding="utf8")
+
+    submission = p1_io.ingest_submission(str(path), assignment=assignment)
+
+    assert submission.assignment_id == assignment.id
+    by_problem = {a.problem_id: a.final_answer for a in submission.answers}
+    assert by_problem[q1.id] == "1"  # correctly matched despite appearing second in the file
+    assert by_problem[q2.id] == "2"
+
+
 @pytest.mark.parametrize(
     "injected",
     [
@@ -417,6 +451,32 @@ def test_p1_store_round_trips_a_rubric_with_criteria_and_failure_signals(tmp_pat
     assert reloaded.status == ArtifactStatus.APPROVED
     assert len(reloaded.criteria) == 1
     assert reloaded.criteria[0].failure_signals == ["missing term", "wrong sign"]
+
+
+def test_p1_store_load_rubric_for_assignment_prefers_the_approved_version(tmp_path):
+    from lanes.p1_storage import P1Store
+
+    store = P1Store(f"sqlite:///{tmp_path / 'p1.db'}")
+    assignment = Assignment(label="hw3", title="HW 3", type="math")
+
+    draft = Rubric(assignment_id=assignment.id, version=1, status=ArtifactStatus.PROPOSED)
+    store.save_rubric(draft)
+    assert store.load_rubric_for_assignment(assignment.id).id == draft.id  # only one so far
+
+    approved = Rubric(assignment_id=assignment.id, version=2, status=ArtifactStatus.APPROVED)
+    store.save_rubric(approved)
+
+    found = store.load_rubric_for_assignment(assignment.id)
+    assert found is not None
+    assert found.id == approved.id
+    assert found.status == ArtifactStatus.APPROVED
+
+
+def test_p1_store_load_rubric_for_assignment_returns_none_when_no_rubric_exists(tmp_path):
+    from lanes.p1_storage import P1Store
+
+    store = P1Store(f"sqlite:///{tmp_path / 'p1.db'}")
+    assert store.load_rubric_for_assignment(Assignment(label="x", title="X", type="math").id) is None
 
 
 def test_p1_store_persists_the_textbook_index(tmp_path):

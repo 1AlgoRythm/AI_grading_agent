@@ -20,9 +20,10 @@ import os
 import re
 from pathlib import Path
 from typing import Iterable, Optional
+from uuid import UUID
 
 import fixtures
-from contracts import ArtifactStatus, Assignment, Problem, SolutionSource, Submission, SubmissionAnswer
+from contracts import ArtifactStatus, Assignment, Problem, SolutionSource, Submission, SubmissionAnswer, new_id
 
 __all__ = ["ingest_assignment", "ingest_submission"]
 
@@ -222,22 +223,44 @@ def _build_parsed_assignment(source: str, text: str) -> Assignment | None:
     return assignment
 
 
-def _build_parsed_submission(source: str, text: str) -> Submission | None:
+def _resolve_problem_id(block: str, index: int, assignment: Optional[Assignment]) -> UUID:
+    """Map a parsed submission block to a real problem id when the target
+    assignment is known: match by extracted label first (e.g. a block
+    literally headed 'Problem 2' -> the assignment's 'Q2'), falling back to
+    position when the label doesn't line up. Without an assignment, this
+    just returns a fresh placeholder id -- the caller is responsible for
+    remapping it once it knows which assignment the submission belongs to."""
+    if assignment is None or not assignment.problems:
+        return new_id()
+    label = _extract_problem_label(block, index)
+    for problem in assignment.problems:
+        if problem.label == label:
+            return problem.id
+    if index - 1 < len(assignment.problems):
+        return assignment.problems[index - 1].id
+    return new_id()
+
+
+def _build_parsed_submission(source: str, text: str, assignment: Optional[Assignment] = None) -> Submission | None:
     blocks = _split_submission_blocks(text)
     if not blocks:
         return None
 
-    submission = _template_submission()
-    submission.student_label = Path(source).stem if _source_path(source) else submission.student_label
-    for answer, block in zip(submission.answers, blocks):
-        answer.work_text = _sanitize_text(block)
-        answer.final_answer = _extract_final_answer(block)
-    if len(blocks) < len(submission.answers):
-        for answer in submission.answers[len(blocks):]:
-            answer.work_text = ""
-            answer.final_answer = None
-    submission.sanitized = True
-    return submission
+    label = Path(source).stem if _source_path(source) else "student"
+    answers = [
+        SubmissionAnswer(
+            problem_id=_resolve_problem_id(block, index, assignment),
+            work_text=_sanitize_text(block),
+            final_answer=_extract_final_answer(block),
+        )
+        for index, block in enumerate(blocks, start=1)
+    ]
+    return Submission(
+        assignment_id=assignment.id if assignment else new_id(),
+        student_label=label,
+        answers=answers,
+        sanitized=True,
+    )
 
 
 def ingest_assignment(source: str) -> Assignment:
@@ -255,24 +278,33 @@ def ingest_assignment(source: str) -> Assignment:
     return _strip_fixture_solutions(fixtures.sample_assignment())
 
 
-def ingest_submission(source: str) -> Submission:
+def ingest_submission(source: str, assignment: Optional[Assignment] = None) -> Submission:
     """Parse a student submission source into a structured `Submission`.
 
-    Parsed text is mapped onto the shared fixture submission shape so the rest
-    of the pipeline can keep using the frozen contract without needing a new
-    submission schema.
+    Each parsed block becomes its own answer (not a fixed-size clone of the
+    demo fixture's two answers), so this works for assignments with any
+    number of problems. When the target `assignment` is known, each answer
+    is mapped to a real `problem_id` (by extracted label, falling back to
+    position) and `assignment_id` is set to the real assignment -- pass it
+    whenever you have it. Without it, ids are placeholders the caller must
+    remap once it knows which assignment the submission belongs to.
     """
     lower = (source or "").lower()
     if "sample" in lower or "student_07" in lower:
-        return fixtures.sample_submission().model_copy(deep=True)
+        sub = fixtures.sample_submission().model_copy(deep=True)
+        if assignment is not None:
+            sub.assignment_id = assignment.id
+        return sub
 
     text = _read_source_text(source)
     if text:
-        parsed = _build_parsed_submission(source, text)
+        parsed = _build_parsed_submission(source, text, assignment)
         if parsed is not None:
             return parsed
 
     sub = _template_submission()
+    if assignment is not None:
+        sub.assignment_id = assignment.id
     for ans in sub.answers:
         ans.work_text = _sanitize_text(ans.work_text or "")
         if ans.final_answer:
