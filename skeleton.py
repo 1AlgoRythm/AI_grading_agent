@@ -65,6 +65,7 @@ def main() -> None:
     # 7. FEEDBACK (P3)
     stage("7. Generate feedback  [P3]")
     feedback = p3.generate_feedback(grade, rubric)
+    p3.register_feedback_context(grade, rubric)
     for text in feedback.values():
         print(f"  {text}")
 

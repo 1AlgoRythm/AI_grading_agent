@@ -37,6 +37,24 @@ def test_context_within_budget():
         assert ctx.estimated_tokens <= ctx.token_budget
 
 
+def test_p1_handoff_context_matches_rubric_and_problems():
+    assignment = f.sample_assignment()
+    rubric = f.sample_rubric()
+    context = f.sample_submission_context()
+    problem_ids = {problem.id for problem in assignment.problems}
+
+    assert len(context.problem_contexts) == len(assignment.problems)
+    for problem_context in context.problem_contexts:
+        assert problem_context.problem_id in problem_ids
+        assert problem_context.rubric_criteria
+        assert problem_context.points_possible > 0
+        assert problem_context.estimated_tokens <= problem_context.token_budget
+        assert problem_context.problem_statement
+        assert problem_context.reference_solution
+        assert problem_context.grading_policy
+        assert rubric.for_problem(problem_context.problem_id)
+
+
 # ---- validators fire on bad data ------------------------------------------ #
 
 def test_partial_credit_requires_reason():
