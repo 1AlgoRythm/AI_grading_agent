@@ -5,11 +5,15 @@ streamlit>=1.38
 sqlalchemy>=2.0
 psycopg[binary]>=3.1
 
+# P1: real ingestion/verification/retrieval features depend on these. They
+# were previously commented out, which meant PDF ingestion and the vector-
+# store-backed textbook index silently degraded to fixture/naive-scan
+# fallbacks on a clean checkout, with no error telling you that happened.
+pypdf>=4.0         # P1 — text-PDF assignment/submission ingestion
+sympy>=1.12        # P1 (solution substitution check) & P2 (equivalence tool)
+chromadb>=0.5      # P1 — vector-store-backed textbook index
+
 # Added per lane as real implementations land (uncomment when needed):
 # fastapi           # P3 — API
 # uvicorn           # P3 — server
-# sqlalchemy        # all — Postgres models
-# psycopg[binary]   # all — Postgres driver
-# sympy             # P2 — math verification tool
-# chromadb          # P1 — vector store (only if a textbook corpus is used)
 # anthropic         # BYOK provider (or openai / google-generativeai)

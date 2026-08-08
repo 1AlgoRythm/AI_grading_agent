@@ -30,10 +30,23 @@ def _stub_response(prompt: str, max_tokens: int | None = None) -> str:
     )
 
 
-def call_model(prompt: str, max_tokens: Optional[int] = 512) -> str:
+def call_model(
+    prompt: str,
+    max_tokens: Optional[int] = 512,
+    temperature: float = 0.0,
+    model: Optional[str] = None,
+) -> str:
+    """Call the configured model.
+
+    `temperature` and `model` are optional overrides on top of the
+    `MODEL_NAME` env var -- callers that need independence from another call
+    site using the same provider (e.g. a critic that must not just replay the
+    grader's own reasoning) can ask for a different model and/or a higher
+    temperature without needing a second BYOK configuration.
+    """
     provider = os.getenv("MODEL_PROVIDER")
     key = os.getenv("MODEL_API_KEY")
-    name = os.getenv("MODEL_NAME")
+    name = model or os.getenv("MODEL_NAME")
     # Minimal OpenAI path if requested (non-blocking if package absent).
     if provider == "openai" and key:
         try:
@@ -44,7 +57,7 @@ def call_model(prompt: str, max_tokens: Optional[int] = 512) -> str:
                 model=name or "gpt-4o-mini",
                 messages=[{"role": "user", "content": prompt}],
                 max_tokens=max_tokens or 512,
-                temperature=0.0,
+                temperature=temperature,
             )
             return resp.choices[0].message.content
         except Exception:
@@ -54,13 +67,18 @@ def call_model(prompt: str, max_tokens: Optional[int] = 512) -> str:
     return _stub_response(prompt, max_tokens)
 
 
-def call_model_json(prompt: str, max_tokens: Optional[int] = 512) -> dict:
+def call_model_json(
+    prompt: str,
+    max_tokens: Optional[int] = 512,
+    temperature: float = 0.0,
+    model: Optional[str] = None,
+) -> dict:
     """Call the model expecting a JSON-serializable dict response.
 
     The fallback returns a simple dict with `version` and `criteria` when
     parsing fails.
     """
-    text = call_model(prompt, max_tokens)
+    text = call_model(prompt, max_tokens, temperature=temperature, model=model)
     try:
         return json.loads(text)
     except Exception:
