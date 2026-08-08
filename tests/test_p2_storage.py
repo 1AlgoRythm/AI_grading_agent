@@ -44,6 +44,19 @@ def test_grades_for_submission_finds_every_saved_grade(tmp_path):
     assert results[0].id == grade.id
 
 
+def test_grades_for_assignment_finds_every_saved_grade_for_that_assignment(tmp_path):
+    store = P2Store(f"sqlite:///{tmp_path / 'p2.db'}")
+    submission = f.sample_submission()
+    grade, trace = p2.grade(submission, f.sample_rubric(), f.sample_submission_context())
+    store.save(grade, trace)
+
+    results = store.grades_for_assignment(f.AID)
+    assert len(results) == 1
+    assert results[0].id == grade.id
+
+    assert store.grades_for_assignment(f.GID) == []  # a different, unrelated id
+
+
 def test_critic_results_are_extracted_from_critique_steps(tmp_path):
     store = P2Store(f"sqlite:///{tmp_path / 'p2.db'}")
     submission = f.sample_submission()

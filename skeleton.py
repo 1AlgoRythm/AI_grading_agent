@@ -27,7 +27,7 @@ def stage(title: str) -> None:
 
 
 def main() -> None:
-    p1_store = P1Store(os.getenv("P1_DATABASE_URL", "sqlite:///p1_demo.db"))
+    p1_store = P1Store(os.getenv("DATABASE_URL", "sqlite:///p1_demo.db"))
 
     # 0. SYNC TEXTBOOK INDEX (P1) -- persist the on-disk corpus into the DB-
     # backed textbook_index table so it's durable and queryable, regardless
