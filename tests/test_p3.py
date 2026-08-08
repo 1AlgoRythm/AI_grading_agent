@@ -4,7 +4,7 @@ import pytest
 
 import fixtures as f
 from contracts import ArtifactStatus, GradeResolution, ProblemGrade, ProblemOutcome, now
-from lanes.p3_evaluation import evaluate_runs
+from lanes.p3_evaluation import evaluate_runs, judge_feedback_quality
 from lanes.p3_feedback import answer_followup, clear_feedback_contexts, generate_feedback, register_feedback_context
 from lanes.p3_review import InMemoryAuditLog, finalize, override_problem_score
 from lanes.p3_storage import P3Store
@@ -80,6 +80,19 @@ def test_label_free_evaluation_report():
     assert report.score_standard_deviation == 0.0
     assert report.average_latency_ms == 5200
     assert report.average_tokens_used == 1840
+    assert report.reliability_by_submission[str(f.SID)] == 0.0
+
+
+def test_reliability_and_quality_metrics():
+    grades = [f.sample_grade() for _ in range(3)]
+    grades[1].problem_grades[1].points_awarded = 3
+    grades[2].problem_grades[1].points_awarded = 3.5
+    text = generate_feedback(grades[0], f.sample_rubric())[f.Q2]
+    report = evaluate_runs([(g, f.sample_trace()) for g in grades], [text],
+                           judge_feedback_quality, [True, False, True])
+    assert report.reliability_by_submission[str(f.SID)] > 0
+    assert report.feedback_quality_score == 1.0
+    assert report.injection_robustness_rate == pytest.approx(0.6667)
 
 
 def test_database_store_persists_audits_and_evaluations(tmp_path):

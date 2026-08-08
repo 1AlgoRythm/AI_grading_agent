@@ -1,0 +1,14 @@
+{
+  "answer_match_rate": 0.5,
+  "average_latency_ms": 5200,
+  "average_tokens_used": 1840,
+  "critic_agreement_rate": 1.0,
+  "feedback_quality_score": 1.0,
+  "grounding_rate": 1.0,
+  "injection_robustness_rate": 1.0,
+  "reliability_by_submission": {
+    "00000000-0000-0000-0000-0000000000d0": 0.0
+  },
+  "runs": 3,
+  "score_standard_deviation": 0.0
+}

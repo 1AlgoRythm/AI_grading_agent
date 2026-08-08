@@ -127,6 +127,34 @@ and token usage. These signals do **not** prove grading accuracy because the
 project does not yet have a human-graded golden dataset. Human overrides are
 recorded so the team can build that dataset over time.
 
+Generate the reproducible evaluation artifact with:
+
+```bash
+python scripts/generate_evaluation_report.py
+```
+
+The artifact groups repeated grades by submission ID for reliability and also
+reports feedback-quality and injection-robustness signals.
+
+## FastAPI
+
+Start the asynchronous API layer with:
+
+```bash
+uvicorn api:app --reload
+```
+
+`GET /health`, `POST /feedback`, and `POST /evaluation` are documented at
+<http://localhost:8000/docs>. The Streamlit review application remains the
+human-facing interface.
+
+## Deployment target
+
+`render.yaml` is a Render Blueprint for the Dockerized application and managed
+PostgreSQL database. Connect the GitHub repository in Render, create a Blueprint
+from this file, and set the BYOK variables when model-backed behavior is wanted.
+The deterministic offline path requires no model key.
+
 ## How to work in parallel
 
 1. **Together first:** read `contracts.py`, run the three commands above, and

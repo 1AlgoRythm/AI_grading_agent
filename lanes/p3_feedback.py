@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import re
+import os
 from dataclasses import dataclass
 from uuid import UUID
 
 from contracts import Grade, ProblemGrade, ProblemOutcome, Rubric
 from lanes.p3_review import finalize
+from lanes.p1_rag import retrieve_method_from_textbook
+from model_provider import call_model
 
 __all__ = [
     "answer_followup",
@@ -112,4 +115,21 @@ def answer_followup(question: str, submission_id: UUID) -> str:
     explanations = " ".join(
         f"Problem {problem_id.hex[-2:]} — {text}" for problem_id, text in selected
     )
-    return f"Based on the approved rubric and recorded grading evidence: {explanations}"
+    rubric_query = " ".join(
+        criterion.description for criterion in context.rubric.criteria
+        if any(criterion.problem_id == problem_id for problem_id, _ in selected)
+    )
+    source = retrieve_method_from_textbook(f"{question} {rubric_query}")
+    grounded = f"Based on the approved rubric and recorded grading evidence: {explanations}"
+    if source:
+        citation = _clean(source)[:350]
+        grounded += f" Course-material citation: {citation}"
+    if os.getenv("MODEL_PROVIDER") and os.getenv("MODEL_API_KEY"):
+        prompt = (
+            "Answer the student's question using only the supplied grading evidence, rubric, "
+            "and course excerpt. Be specific, consistent with the score, and actionable. "
+            "If an excerpt is present, cite it as Course material.\n"
+            f"Question: {question}\nGrounded context: {grounded}"
+        )
+        return _clean(call_model(prompt, max_tokens=350, temperature=0.0))
+    return grounded

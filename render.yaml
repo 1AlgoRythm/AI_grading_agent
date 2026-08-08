@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: ai-grading-agent
+    runtime: docker
+    plan: free
+    healthCheckPath: /_stcore/health
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase: {name: ai-grading-db, property: connectionString}
+      - key: MODEL_PROVIDER
+        sync: false
+      - key: MODEL_NAME
+        sync: false
+      - key: MODEL_API_KEY
+        sync: false
+databases:
+  - name: ai-grading-db
+    plan: free
+    databaseName: grading
+    user: grading
