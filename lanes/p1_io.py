@@ -85,11 +85,32 @@ def _read_source_text(source: str) -> str | None:
         return None
 
 
+# Prompt-injection patterns to strip on ingestion. Submission text is
+# untrusted (§4/§15 of the project plan) and is never treated as
+# instructions downstream, but scrubbing obvious override attempts here
+# means less injected content even reaches a model prompt. Patterns require
+# a tag/colon delimiter so ordinary prose ("the system of equations") is
+# never touched.
+_INJECTION_PATTERNS = (
+    r"</?\s*(system|assistant|user|human|instructions?)\s*>",  # <system>...</system>
+    r"\[/?\s*(system|inst|instructions?)\s*\]",                 # [INST] / [/SYSTEM]
+    r"\b(system|assistant|user|human)\s*:",                     # role-prefixed lines
+    r"ignore\s+(?:\w+\s+){0,3}instructions\b",
+    r"disregard\s+(?:\w+\s+){0,3}(rubric|instructions)\b",
+    r"you\s+are\s+now\s+(in|acting\s+as)\b",
+    r"you\s+must\s+(now\s+)?(output|award|give|return)\b",
+    r"as\s+(the|an?)\s+(grading\s+)?(ai|assistant|model|grader)\b",
+    r"#\s*prompt\b",
+)
+_INJECTION_RE = re.compile("|".join(_INJECTION_PATTERNS), re.IGNORECASE)
+
+
 def _sanitize_text(text: str, max_length: int = 50_000) -> str:
     text = re.sub(r"[\x00-\x1f\x7f]+", " ", text)
+    text = re.sub(r"<\s*script\b[^>]*>.*?<\s*/\s*script\s*>", " ", text, flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(r"<\s*script\b[^>]*>", " ", text, flags=re.IGNORECASE)
+    text = _INJECTION_RE.sub("[redacted]", text)
     text = re.sub(r"\s+", " ", text).strip()
-    for marker in ("system:", "assistant:", "user:", "#prompt", "<script>"):
-        text = text.replace(marker, "")
     return text[:max_length]
 
 

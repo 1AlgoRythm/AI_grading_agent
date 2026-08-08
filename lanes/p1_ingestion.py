@@ -21,6 +21,7 @@ from lanes.p1_io import ingest_submission as ingest_submission
 from lanes.p1_rag import retrieve_method_from_textbook as retrieve_method
 from lanes.p1_solution import develop_solution as develop_solution
 from lanes.p1_solution import draft_rubric as draft_rubric
+from lanes.p1_solution import verify_solution as verify_solution
 from lanes.p1_context import build_context as build_context
 from lanes.p1_context import build_submission_context as build_submission_context
 
@@ -28,6 +29,7 @@ __all__ = [
     "retrieve_method",
     "ingest_assignment",
     "develop_solution",
+    "verify_solution",
     "draft_rubric",
     "ingest_submission",
     "build_context",

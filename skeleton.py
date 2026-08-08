@@ -12,10 +12,14 @@ Run from inside the grading_agent/ directory:
 
 from __future__ import annotations
 
+import os
+
 from contracts import ArtifactStatus
 from lanes import p1_ingestion as p1
+from lanes import p1_rag
 from lanes import p2_grading as p2
 from lanes import p3_feedback as p3
+from lanes.p1_storage import P1Store
 
 
 def stage(title: str) -> None:
@@ -23,54 +27,80 @@ def stage(title: str) -> None:
 
 
 def main() -> None:
+    p1_store = P1Store(os.getenv("P1_DATABASE_URL", "sqlite:///p1_demo.db"))
+
+    # 0. SYNC TEXTBOOK INDEX (P1) -- persist the on-disk corpus into the DB-
+    # backed textbook_index table so it's durable and queryable, regardless
+    # of whether a vector store happens to be installed.
+    stage("0. Sync textbook index to the database  [P1]")
+    chunks_indexed = p1_rag.sync_textbook_index(p1_store)
+    print(f"  indexed {chunks_indexed} textbook chunk(s) into the textbook_index table")
+
     # 1. INGEST (P1)
     stage("1. Ingest assignment  [P1]")
     assignment = p1.ingest_assignment("uploads/hw3.pdf")
     print(f"  parsed {len(assignment.problems)} problems from '{assignment.label}'")
 
-    # 2. DEVELOP + APPROVE SOLUTION (P1 + human gate)
-    stage("2. Develop & approve model solution  [P1 + human]")
+    # 2. RETRIEVE METHOD (P1) -- done once, up front, and reused below to
+    # ground BOTH the solution and the rubric (plan §4: "generate a model
+    # solution grounded in the retrieved method"; §6: retrieved only here,
+    # at design time, never at grading time).
+    stage("2. Retrieve course method per problem  [P1]")
+    method_context = {}
     for prob in assignment.problems:
-        p1.develop_solution(prob)
-        print(f"  {prob.label}: proposed solution -> answer = {prob.reference_answer!r}")
-        prob.solution_status = ArtifactStatus.APPROVED          # human approves
-    print("  [human] all solutions APPROVED")
+        snippet = p1.retrieve_method(prob.statement)
+        method_context[prob.id] = snippet
+        print(f"  {prob.label}: retrieved method -> {snippet[:60] + '...' if snippet else None!r}")
 
-    # 3. DRAFT + APPROVE RUBRIC (P1 + human gate)
-    stage("3. Draft & approve rubric  [P1 + human]")
-    rubric = p1.draft_rubric(assignment, method_context={})
+    # 3. DEVELOP + APPROVE SOLUTION (P1 + human gate)
+    stage("3. Develop & approve model solution  [P1 + human]")
+    for prob in assignment.problems:
+        p1.develop_solution(prob, method_context=method_context.get(prob.id))
+        ok, note = p1.verify_solution(prob)
+        print(f"  {prob.label}: proposed solution -> answer = {prob.reference_answer!r}")
+        print(f"    verify_solution: ok={ok} — {note}")
+        prob.solution_status = ArtifactStatus.APPROVED          # human approves (verify_solution never auto-approves)
+    print("  [human] all solutions APPROVED")
+    p1_store.save_assignment(assignment)
+    print(f"  persisted assignment '{assignment.label}' ({len(assignment.problems)} problems) to the database")
+
+    # 4. DRAFT & APPROVE RUBRIC (P1 + human gate)
+    stage("4. Draft & approve rubric  [P1 + human]")
+    rubric = p1.draft_rubric(assignment, method_context=method_context)
     print(f"  drafted rubric v{rubric.version}, {len(rubric.criteria)} criteria [{rubric.status.value}]")
     rubric.status = ArtifactStatus.APPROVED                     # human approves
     print("  [human] rubric APPROVED")
+    p1_store.save_rubric(rubric)
+    print(f"  persisted rubric v{rubric.version} ({len(rubric.criteria)} criteria) to the database")
 
-    # 4. INGEST SUBMISSION (P1)
-    stage("4. Ingest submission  [P1]")
+    # 5. INGEST SUBMISSION (P1)
+    stage("5. Ingest submission  [P1]")
     submission = p1.ingest_submission("uploads/student_07.pdf")
     print(f"  {submission.student_label}: {len(submission.answers)} answers, sanitized={submission.sanitized}")
 
-    # 5. BUILD CONTEXT (P1)
-    stage("5. Build grading context  [P1]")
+    # 6. BUILD CONTEXT (P1)
+    stage("6. Build grading context  [P1]")
     context = p1.build_submission_context(assignment, submission, rubric)
     for c in context.problem_contexts:
         print(f"  problem {c.problem_id.hex[-2:]}: ~{c.estimated_tokens} tokens (budget {c.token_budget})")
 
-    # 6. GRADE — grader (+ critic, later)  (P2)
-    stage("6. Grade  [P2]")
+    # 7. GRADE — grader (+ critic, later)  (P2)
+    stage("7. Grade  [P2]")
     grade, trace = p2.grade(submission, rubric, context)
     for pg in grade.problem_grades:
         print(f"  problem {pg.problem_id.hex[-2:]}: {pg.points_awarded}/{pg.points_possible} [{pg.outcome.value}]")
     print(f"  total {grade.total_awarded}/{grade.total_possible} ({grade.fraction:.0%})"
           f"  | trace: stop={trace.stop_reason.value}, steps={len(trace.steps)}")
 
-    # 7. FEEDBACK (P3)
-    stage("7. Generate feedback  [P3]")
+    # 8. FEEDBACK (P3)
+    stage("8. Generate feedback  [P3]")
     feedback = p3.generate_feedback(grade, rubric)
     p3.register_feedback_context(grade, rubric)
     for text in feedback.values():
         print(f"  {text}")
 
-    # 8. HUMAN REVIEW + FINALIZE (P3 + human gate)
-    stage("8. Human review & finalize  [P3 + human]")
+    # 9. HUMAN REVIEW + FINALIZE (P3 + human gate)
+    stage("9. Human review & finalize  [P3 + human]")
     print(f"  status before: {grade.status.value}")
     p3.finalize(grade, approver_id="instructor_1")
     print(f"  status after:  {grade.status.value}  (by {grade.approver_id}, {grade.resolution.value})")
