@@ -16,9 +16,12 @@ import hashlib
 import os
 import re
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import TYPE_CHECKING, Optional
 
-__all__ = ["retrieve_method_from_textbook"]
+if TYPE_CHECKING:
+    from lanes.p1_storage import P1Store
+
+__all__ = ["retrieve_method_from_textbook", "sync_textbook_index"]
 
 def _tokenize(text: str) -> set[str]:
     return set(re.findall(r"\w+", text.lower()))
@@ -59,11 +62,6 @@ def _hash_embedding(text: str, dimensions: int = 128) -> list[float]:
     return vector
 
 
-class _HashEmbeddingFunction:
-    def __call__(self, input: Iterable[str]) -> list[list[float]]:
-        return [_hash_embedding(text) for text in input]
-
-
 def _list_textbook_sources() -> list[tuple[Path, str]]:
     tb_dir = Path(os.getcwd()) / "textbook"
     if not tb_dir.is_dir():
@@ -92,23 +90,29 @@ def _index_textbook_with_chroma() -> tuple[object | None, list[tuple[Path, str]]
 
     persist_dir = Path(os.getcwd()) / ".p1_textbook_index"
     client = chromadb.PersistentClient(path=str(persist_dir))
+    # No embedding_function is registered on the collection: chroma's
+    # embedding-function protocol has changed across versions (it now
+    # expects a `.name()`/config-conflict contract our simple hash function
+    # doesn't implement). Supplying our own precomputed embeddings on every
+    # upsert/query sidesteps that entirely and is version-stable.
     collection = client.get_or_create_collection(
         name="textbook",
-        embedding_function=_HashEmbeddingFunction(),
         metadata={"lane": "p1", "index": "textbook"},
     )
 
     documents: list[str] = []
     metadatas: list[dict[str, str]] = []
     ids: list[str] = []
+    embeddings: list[list[float]] = []
     for path, content in sources:
         for chunk_index, chunk in enumerate(_chunk_text(content), start=1):
             documents.append(chunk)
             metadatas.append({"path": str(path), "chunk": str(chunk_index)})
             ids.append(f"{path.name}:{chunk_index}")
+            embeddings.append(_hash_embedding(chunk))
 
     if documents:
-        collection.upsert(ids=ids, documents=documents, metadatas=metadatas)
+        collection.upsert(ids=ids, documents=documents, metadatas=metadatas, embeddings=embeddings)
     return collection, sources
 
 
@@ -123,7 +127,8 @@ def retrieve_method_from_textbook(problem_statement: str) -> Optional[str]:
     collection, sources = _index_textbook_with_chroma()
     if collection is not None:
         try:
-            result = collection.query(query_texts=[problem_statement], n_results=1)
+            query_embedding = _hash_embedding(problem_statement)
+            result = collection.query(query_embeddings=[query_embedding], n_results=1)
             documents = result.get("documents", [[]])
             if documents and documents[0]:
                 return documents[0][0].strip()
@@ -153,3 +158,17 @@ def retrieve_method_from_textbook(problem_statement: str) -> Optional[str]:
             best_snippet = content.strip()[:400]
 
     return best_snippet if best_score > 0 else None
+
+
+def sync_textbook_index(store: "P1Store") -> int:
+    """Persist the on-disk `textbook/` corpus into the DB-backed
+    `textbook_index` table (plan §8). Independent of the retrieval hot path
+    above -- this just makes sure the corpus being retrieved from is also
+    durably recorded and queryable, regardless of whether Chroma happens to
+    be installed. Returns the number of chunks indexed."""
+    total = 0
+    for path, content in _list_textbook_sources():
+        chunks = _chunk_text(content)
+        store.index_textbook_chunks(str(path), chunks)
+        total += len(chunks)
+    return total
