@@ -29,11 +29,62 @@ pip install -r requirements.txt
 python fixtures.py     # smoke test: builds every object, checks cross-refs
 python skeleton.py     # watch a submission flow end to end
 pytest -q              # contract tests (fixtures + skeleton path)
+pytest -q tests/test_p2.py   # dedicated P2 grading lane coverage
 ```
 
 If `python skeleton.py` prints the eight stages and ends with "end-to-end path
 executed", the three lanes connect. That is the foundation everything else is
 built on.
+
+## P3 review demo
+
+Run the human-review, grounded-feedback, audit, and evaluation interface:
+
+```bash
+streamlit run p3_app.py
+```
+
+The current screen uses the shared fixtures so it remains usable while P1 and
+P2 replace their stubs. It demonstrates score overrides, required audit reasons,
+final approval, student follow-up explanations, and label-free metrics.
+
+Override audits are stored in `p3_demo.db` by default. Set `DATABASE_URL` to a
+SQLAlchemy PostgreSQL URL to use Postgres instead.
+
+## P1 to P2 handoff
+
+P1 is responsible for assignment parsing, textbook retrieval, model solution
+and rubric drafting, and building the budget-checked `GradingContext` objects
+that P2 consumes directly. P2 should treat the P1 context as the canonical
+input for grading and should not need to re-derive the assignment structure.
+
+## Run with Docker Compose
+
+Docker Compose starts the Streamlit application and PostgreSQL:
+
+```bash
+docker compose up --build
+```
+
+Open <http://localhost:8501>. The database is health-checked before the app
+starts and its records are retained in the `grading_data` volume. Stop the stack
+with `docker compose down`; add `--volumes` only when you intentionally want to
+remove stored audit and evaluation data.
+
+## Configuration and BYOK
+
+Copy `.env.example` to `.env` for local configuration. Never commit `.env` or an
+API key. The shared model-provider integration will consume `MODEL_PROVIDER`,
+`MODEL_NAME`, and `MODEL_API_KEY`; current P3 feedback is deterministic and does
+not require a paid model.
+
+## P3 evaluation limitations
+
+The evaluation report contains label-free indicators: answer-match rate,
+evidence-grounding rate, critic agreement, repeated-run score variance, latency,
+and token usage. These signals do **not** prove grading accuracy because the
+project does not yet have a human-graded golden dataset. Human overrides are
+recorded so the team can build that dataset over time.
 
 ## How to work in parallel
 

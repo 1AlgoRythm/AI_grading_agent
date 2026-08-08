@@ -159,6 +159,10 @@ def sample_submission() -> Submission:
 # --------------------------------------------------------------------------- #
 # Context (what P1 hands to P2) — budget-checked
 # --------------------------------------------------------------------------- #
+#
+# `sample_submission_context()` is the handoff shape P1 guarantees to P2:
+# one `GradingContext` per problem, already curated, budget-checked, and
+# aligned with the approved rubric + solution artifacts.
 
 def _context_for(problem: Problem, answer: SubmissionAnswer, criteria) -> GradingContext:
     parts = [
@@ -185,6 +189,11 @@ def _context_for(problem: Problem, answer: SubmissionAnswer, criteria) -> Gradin
 
 
 def sample_submission_context() -> SubmissionContext:
+    """Return the canonical P1→P2 handoff fixture.
+
+    P2 should be able to consume this object directly without needing to know
+    how P1 assembled it.
+    """
     assignment = sample_assignment()
     rubric = sample_rubric()
     submission = sample_submission()
