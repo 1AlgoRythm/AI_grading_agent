@@ -12,14 +12,24 @@ grading_agent/
 ├── contracts.py         # FROZEN: shared models, enums, seams, exceptions
 ├── fixtures.py          # shared fake data (one math assignment, wired by ID)
 ├── skeleton.py          # the thin end-to-end path through every seam
+├── model_provider.py    # shared BYOK model caller (+ offline fallback)
 ├── requirements.txt
+├── p1_app.py            # [P1] upload / solution-review / rubric-editor demo
+├── p2_app.py            # [P2] grade + trace review demo
+├── p3_app.py            # [P3] human-review, feedback chat, audit, evaluation demo
+├── textbook/            # sample course material for retrieval (P1)
 ├── lanes/
-│   ├── p1_ingestion.py  # [P1] parsing, solution, rubric, context
-│   ├── p2_grading.py    # [P2] grader + critic + verification tool
-│   └── p3_feedback.py   # [P3] feedback, chat, review/finalize
+│   ├── p1_ingestion.py  # [P1] public facade -> p1_io / p1_rag / p1_solution / p1_context / p1_storage
+│   ├── p2_grading.py    # [P2] public facade -> p2_engine / p2_grader / p2_critic / p2_verify / p2_batch / p2_storage
+│   └── p3_feedback.py   # [P3] feedback + chat (see also p3_review, p3_evaluation, p3_storage)
 └── tests/
     └── test_contracts.py
 ```
+
+Each lane's facade module (`p1_ingestion.py`, `p2_grading.py`, `p3_feedback.py`)
+re-exports a stable public API while the real implementation lives in
+dedicated `lanes/p{1,2,3}_*.py` helper files underneath — see each facade's
+docstring for the current split.
 
 ## Run it (day one, together)
 
@@ -36,7 +46,38 @@ If `python skeleton.py` prints the eight stages and ends with "end-to-end path
 executed", the three lanes connect. That is the foundation everything else is
 built on.
 
-## P3 review demo
+## Demo apps
+
+Each lane has its own Streamlit screen, run independently:
+
+### P1 ingestion & rubric demo
+
+```bash
+streamlit run p1_app.py
+```
+
+Upload (or paste) an assignment, develop and review a proposed solution per
+problem (with `verify_solution`'s self-consistency/substitution check shown
+inline), then draft and edit the rubric. A sidebar button syncs the on-disk
+`textbook/` corpus into the `textbook_index` table. Everything persists via
+`P1Store` (`p1_demo.db` by default; set `P1_DATABASE_URL` for Postgres) so an
+in-progress review survives a restart.
+
+### P2 grade + trace review demo
+
+```bash
+streamlit run p2_app.py
+```
+
+Grades the sample submission and shows the full grader → critic →
+reconciliation trace (every REASON/ACT/CRITIQUE/REVISION step), alongside a
+lightweight re-score control for inspecting the effect of a different score.
+This is deliberately *not* the audited approval workflow — it never touches
+`status`/`resolution`/`approver_id` — final approval still happens in the P3
+app below. Persists via `P2Store` (`p2_demo.db` by default; set
+`DATABASE_URL` for Postgres).
+
+### P3 review demo
 
 Run the human-review, grounded-feedback, audit, and evaluation interface:
 
