@@ -29,6 +29,7 @@ pip install -r requirements.txt
 python fixtures.py     # smoke test: builds every object, checks cross-refs
 python skeleton.py     # watch a submission flow end to end
 pytest -q              # contract tests (fixtures + skeleton path)
+pytest -q tests/test_p2.py   # dedicated P2 grading lane coverage
 ```
 
 If `python skeleton.py` prints the eight stages and ends with "end-to-end path
