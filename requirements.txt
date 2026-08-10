@@ -4,6 +4,7 @@ pytest>=8.0
 streamlit>=1.38
 sqlalchemy>=2.0
 psycopg[binary]>=3.1
+python-dotenv>=1.0   # loads .env for local `python` runs (Docker Compose already does this itself)
 
 # P1: real ingestion/verification/retrieval features depend on these. They
 # were previously commented out, which meant PDF ingestion and the vector-
@@ -14,6 +15,7 @@ sympy>=1.12        # P1 (solution substitution check) & P2 (equivalence tool)
 chromadb>=0.5      # P1 — vector-store-backed textbook index
 
 # BYOK model providers -- install whichever you actually have a key for
-# (both are lightweight HTTP clients, safe to keep both installed).
+# (all three are lightweight HTTP clients, safe to keep all installed).
 openai>=1.0
 anthropic>=0.34
+google-genai>=1.0

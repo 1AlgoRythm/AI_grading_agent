@@ -18,7 +18,7 @@ from __future__ import annotations
 import re
 from typing import Optional, Protocol
 
-from lanes.p2_verify import check_equivalence, verify_by_substitution
+from lanes.p2_verify import check_equivalence
 
 __all__ = ["VerificationTool", "MathVerifier", "ProseVerifier", "get_verifier", "verify_verdict"]
 
@@ -42,7 +42,16 @@ class VerificationTool(Protocol):
 
 class MathVerifier:
     """SymPy-backed. Returns None rather than False whenever the comparison
-    could not meaningfully run -- an unparseable answer is not a wrong answer."""
+    could not meaningfully run -- an unparseable answer is not a wrong answer.
+
+    Only does one thing: symbolic equivalence against the curated reference
+    answer. A previous version also tried substituting the student's value
+    back into an equation regex-extracted from the raw problem statement --
+    removed because that only ever worked for the narrowest textbook phrasing
+    ("Solve for x: ...") and gave false confidence on anything else.
+    Assignments aren't fixed to that shape, so anything equivalence can't
+    confirm is left as "not applicable" for the grader/critic LLM to judge.
+    """
 
     name = "sympy_math"
 
@@ -52,17 +61,11 @@ class MathVerifier:
             return None
 
         if reference_answer and _looks_symbolic(reference_answer) and _looks_symbolic(answer):
-            if check_equivalence(answer, reference_answer):
-                return True
-            substituted = verify_by_substitution(answer, problem_statement or "")
-            if substituted is True:
-                return True
-            return False
+            return check_equivalence(answer, reference_answer)
 
-        # Reference or answer is prose: substitution is the only check left,
-        # and it has no opinion unless the statement is a single equation.
-        substituted = verify_by_substitution(answer, problem_statement or "")
-        return True if substituted is True else None
+        # Reference or answer is prose (or there's no reference at all):
+        # equivalence checking has no opinion here.
+        return None
 
 
 class ProseVerifier:

@@ -12,7 +12,7 @@ from typing import Optional
 
 import fixtures
 from contracts import ArtifactStatus, Problem, Assignment, Rubric, SolutionSource, new_id
-from model_provider import call_model, call_model_json
+from model_provider import call_model_json
 from lanes.p2_verify import check_equivalence
 
 __all__ = ["develop_solution", "draft_rubric", "verify_solution"]
@@ -20,22 +20,29 @@ __all__ = ["develop_solution", "draft_rubric", "verify_solution"]
 
 def _generate_solution_text(problem: Problem, method_context: Optional[str]) -> tuple[str, Optional[str]]:
     """Call the model for an independent solution, grounded in the retrieved
-    course method when one is available. Returns (solution_text, final_answer)."""
+    course method when one is available. Returns (solution_text, final_answer).
+
+    Uses `call_model_json` (structured output), not free-text line-scanning
+    for a literal "Final answer:" marker -- real models routinely phrase
+    their final line differently even when asked to use that exact marker,
+    which silently lost the answer. JSON output is the same reliable pattern
+    already used for the grader/critic prompts."""
     prompt = (
-        f"Draft a concise model solution and a one-line final answer for the problem:\n{problem.statement}\n"
+        "Draft a concise model solution for this problem, showing the key steps.\n"
+        f"Problem: {problem.statement}\n"
     )
     if method_context:
         prompt += f"Ground your method in this course material:\n{method_context}\n"
-    raw = call_model(prompt, max_tokens=512)
-    ans = None
-    for line in raw.splitlines():
-        if line.lower().startswith("final answer:"):
-            # Split on the generic ":" (not the case-sensitive literal
-            # "final answer:") so this doesn't break on the very likely case
-            # of a real model capitalizing it as "Final answer:".
-            ans = line.split(":", 1)[1].strip()
-            break
-    return raw.strip(), ans
+    prompt += (
+        "\nRespond with ONLY a JSON object: {\"solution\": <string with the worked "
+        "solution>, \"final_answer\": <string with just the final answer>}."
+    )
+    raw = call_model_json(prompt, max_tokens=512)
+    if isinstance(raw, dict) and raw.get("solution"):
+        answer = raw.get("final_answer")
+        return str(raw["solution"]).strip(), str(answer).strip() if answer else None
+    # Offline stub / unparseable response: no structured solution came back.
+    return "", None
 
 
 def _develop_with_sample_cross_check(
@@ -198,16 +205,14 @@ def _self_consistency_check(problem: Problem) -> Optional[tuple[bool, str]]:
     if not _model_configured():
         return None
     prompt = (
-        "Solve this problem independently, showing brief work, and end your "
-        "response with a line of the exact form 'Final answer: <value>'.\n"
-        f"{problem.statement}"
+        "Solve this problem independently, showing brief work.\n"
+        f"Problem: {problem.statement}\n\n"
+        "Respond with ONLY a JSON object: {\"final_answer\": <string with just the "
+        "final answer>}."
     )
-    raw = call_model(prompt, max_tokens=256)
-    rederived: Optional[str] = None
-    for line in raw.splitlines():
-        if line.lower().startswith("final answer:"):
-            rederived = line.split(":", 1)[1].strip()
-            break
+    raw = call_model_json(prompt, max_tokens=256)
+    rederived = raw.get("final_answer") if isinstance(raw, dict) else None
+    rederived = str(rederived).strip() if rederived else None
     if not rederived:
         return None
     if not _looks_symbolic(problem.reference_answer or "") or not _looks_symbolic(rederived):
@@ -235,81 +240,35 @@ def _looks_symbolic(text: str) -> bool:
     return bool(re.search(r"[0-9=+\-*/^]", stripped))
 
 
-def _prep_expr(expr: str) -> str:
-    expr = expr.replace("^", "**")
-    return re.sub(r"(\d)([a-zA-Z])", r"\1*\2", expr)
-
-
-def _substitution_check(statement: str, answer: str) -> Optional[tuple[bool, str]]:
-    """Best-effort: for a 'solve for <var>' problem, substitute the proposed
-    answer back into the original equation and check it actually satisfies
-    it. Returns None (skip, not a failure) when the statement/answer aren't
-    in a simple single-equation, single-variable form this can parse."""
-    var_match = re.search(r"\b([a-zA-Z])\s*=\s*(.+)", answer.strip())
-    if not var_match:
-        return None
-
-    region = statement.split(":")[-1]
-    eq_match = re.search(r"([^=]+)=([^=]+)", region)
-    if not eq_match:
-        return None
-
-    var, value_str = var_match.group(1), var_match.group(2).strip()
-    lhs_str = eq_match.group(1).strip().rstrip(".,;")
-    rhs_str = eq_match.group(2).strip().rstrip(".,;")
-    try:
-        import sympy as sp
-
-        symbol = sp.symbols(var)
-        value = sp.sympify(_prep_expr(value_str))
-        lhs = sp.sympify(_prep_expr(lhs_str))
-        rhs = sp.sympify(_prep_expr(rhs_str))
-        satisfied = sp.simplify(lhs.subs(symbol, value) - rhs.subs(symbol, value)) == 0
-    except Exception:
-        return None
-
-    verb = "satisfies" if satisfied else "does NOT satisfy"
-    return satisfied, f"Substitution check: {var} = {value} {verb} the original equation."
-
-
 def verify_solution(problem: Problem) -> tuple[bool, str]:
     """Best-effort validation of a proposed solution (decision: never
-    approves — a human approves). Runs self-consistency (re-derive and
-    compare) and, where the problem is a simple solvable equation,
-    substitution (plug the answer back in and check it holds)."""
+    approves -- a human approves) via self-consistency: re-derive the answer
+    independently through the LLM and compare it with P2's check_equivalence
+    tool.
+
+    A regex-based substitution check used to run here too (extract the one
+    equation from the raw problem statement, plug the answer back in).
+    Removed because it only ever worked for the narrowest textbook phrasing
+    ("Solve for x: ...") and gave false confidence everywhere else --
+    assignments aren't fixed to that shape, so the check that actually
+    generalizes is the LLM's own re-derivation plus the equivalence tool,
+    not a hand-rolled parser standing in for one.
+    """
     if not problem.reference_answer or not problem.reference_solution:
         return False, "No proposed solution to verify yet."
 
-    notes: list[str] = []
-    ok = True
-    ran_any_check = False
-
     consistency = _self_consistency_check(problem)
     if consistency is not None:
-        ran_any_check = True
-        agrees, note = consistency
-        ok = ok and agrees
-        notes.append(note)
-    elif not _model_configured():
-        notes.append("Self-consistency check skipped (no BYOK model provider configured).")
+        return consistency
+
+    if not _model_configured():
+        note = "Self-consistency check skipped (no BYOK model provider configured)."
     elif not _looks_symbolic(problem.reference_answer or ""):
-        notes.append(
+        note = (
             "Self-consistency check skipped: the reference answer is free-form prose "
             "(e.g. a proof or written explanation), not a short symbolic expression "
             "equivalence checking can meaningfully compare -- rely on human review here."
         )
     else:
-        notes.append("Self-consistency check skipped: no comparable answer was re-derived.")
-
-    substitution = _substitution_check(problem.statement, problem.reference_answer)
-    if substitution is not None:
-        ran_any_check = True
-        satisfied, note = substitution
-        ok = ok and satisfied
-        notes.append(note)
-    else:
-        notes.append("Substitution check skipped (not a simple solvable equation).")
-
-    if not ran_any_check:
-        return False, " ".join(notes) + " No verification could be performed; needs human review."
-    return ok, " ".join(notes)
+        note = "Self-consistency check skipped: no comparable answer was re-derived."
+    return False, f"{note} No verification could be performed; needs human review."

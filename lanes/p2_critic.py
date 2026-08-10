@@ -151,7 +151,10 @@ def _offline_fallback(context: GradingContext, grader_result: GraderResult) -> C
 
 def run_critic(context: GradingContext, grader_result: GraderResult) -> CriticResult:
     prompt = build_critic_prompt(context, grader_result)
-    temperature = float(os.getenv("CRITIC_TEMPERATURE", _DEFAULT_CRITIC_TEMPERATURE))
+    # `or` (not getenv's own default) because a blank .env line like
+    # "CRITIC_TEMPERATURE=" sets the var to "" rather than leaving it unset --
+    # getenv's default only kicks in when the key is missing entirely.
+    temperature = float(os.getenv("CRITIC_TEMPERATURE") or _DEFAULT_CRITIC_TEMPERATURE)
     model = os.getenv("CRITIC_MODEL_NAME") or None
     raw = call_model_json(prompt, max_tokens=512, temperature=temperature, model=model)
     result = _parse_response(raw)

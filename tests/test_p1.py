@@ -199,7 +199,14 @@ def test_textbook_index_is_cached_across_calls(tmp_path, monkeypatch):
     assert snippet is not None and "completely different" in snippet.lower()
 
 
-def test_verify_solution_confirms_a_correct_equation_via_substitution(monkeypatch):
+def test_verify_solution_cannot_confirm_correctness_without_a_real_model(monkeypatch):
+    # Substitution-based verification (regex-extract the equation from the
+    # raw statement, plug the value back in) used to let this run entirely
+    # offline. It was removed -- it only ever worked for this narrowest
+    # "Solve for x: ..." phrasing and gave false confidence everywhere else,
+    # since assignments aren't fixed to that shape. Without a real BYOK
+    # model to re-derive the answer, verify_solution now honestly reports
+    # "can't verify" instead of quietly reconstructing an equation to check.
     monkeypatch.delenv("MODEL_PROVIDER", raising=False)
     monkeypatch.delenv("MODEL_API_KEY", raising=False)
     problem = Problem(
@@ -211,28 +218,54 @@ def test_verify_solution_confirms_a_correct_equation_via_substitution(monkeypatc
         reference_solution="2x + 6 = 10 -> 2x = 4 -> x = 2.",
     )
     ok, note = p1_solution.verify_solution(problem)
-    assert ok is True
-    assert "satisfies the original equation" in note
-    assert "Self-consistency check skipped" in note
+    assert ok is False
+    assert "No verification could be performed" in note
 
 
-def test_verify_solution_flags_an_incorrect_equation_via_substitution(monkeypatch):
-    monkeypatch.delenv("MODEL_PROVIDER", raising=False)
-    monkeypatch.delenv("MODEL_API_KEY", raising=False)
+def test_verify_solution_confirms_via_llm_self_consistency(monkeypatch):
+    # With a real model configured, verification comes purely from the LLM
+    # independently re-deriving the answer, compared via check_equivalence --
+    # no substitution/regex parsing of the problem statement involved.
+    monkeypatch.setenv("MODEL_PROVIDER", "openai")
+    monkeypatch.setenv("MODEL_API_KEY", "fake-key-for-test")
+    monkeypatch.setattr(
+        p1_solution, "call_model_json",
+        lambda prompt, max_tokens=512: {"final_answer": "x = 2"},
+    )
     problem = Problem(
         assignment_id=Assignment(label="hw", title="HW", type="math").id,
         label="Q1",
         statement="Solve for x:  2x + 6 = 10.",
         points_possible=5,
-        reference_answer="x = 3",  # wrong on purpose
-        reference_solution="2x + 6 = 10 -> 2x = 4 -> x = 3.",
+        reference_answer="x = 2",
+        reference_solution="2x + 6 = 10 -> 2x = 4 -> x = 2.",
+    )
+    ok, note = p1_solution.verify_solution(problem)
+    assert ok is True
+    assert "agrees" in note
+
+
+def test_verify_solution_flags_disagreement_via_llm_self_consistency(monkeypatch):
+    monkeypatch.setenv("MODEL_PROVIDER", "openai")
+    monkeypatch.setenv("MODEL_API_KEY", "fake-key-for-test")
+    monkeypatch.setattr(
+        p1_solution, "call_model_json",
+        lambda prompt, max_tokens=512: {"final_answer": "x = 4"},
+    )
+    problem = Problem(
+        assignment_id=Assignment(label="hw", title="HW", type="math").id,
+        label="Q1",
+        statement="Solve for x:  2x + 6 = 10.",
+        points_possible=5,
+        reference_answer="x = 2",  # correct; the fake re-derivation disagrees on purpose
+        reference_solution="2x + 6 = 10 -> 2x = 4 -> x = 2.",
     )
     ok, note = p1_solution.verify_solution(problem)
     assert ok is False
-    assert "does NOT satisfy" in note
+    assert "disagrees" in note
 
 
-def _fake_call_model(response: str):
+def _fake_call_model_json(response: dict):
     def _fake(prompt, max_tokens=512):
         _fake.last_prompt = prompt
         return response
@@ -248,7 +281,10 @@ def test_develop_solution_ignores_the_fixture_shortcut_when_a_real_model_is_conf
     # touching the model.
     monkeypatch.setenv("MODEL_PROVIDER", "openai")
     monkeypatch.setenv("MODEL_API_KEY", "fake-key-for-test")
-    monkeypatch.setattr(p1_solution, "call_model", _fake_call_model("Some derivation.\nFinal answer: 999"))
+    monkeypatch.setattr(
+        p1_solution, "call_model_json",
+        _fake_call_model_json({"solution": "Some derivation.", "final_answer": "999"}),
+    )
     problem = Problem(
         assignment_id=Assignment(label="hw", title="HW", type="math").id,
         label="Q1", statement="A totally different problem than the fixture's Q1", points_possible=5,
@@ -260,8 +296,8 @@ def test_develop_solution_ignores_the_fixture_shortcut_when_a_real_model_is_conf
 
 
 def test_develop_solution_grounds_prompt_in_the_retrieved_method(monkeypatch):
-    fake = _fake_call_model("Some derivation.\nFinal answer: 9")
-    monkeypatch.setattr(p1_solution, "call_model", fake)
+    fake = _fake_call_model_json({"solution": "Some derivation.", "final_answer": "9"})
+    monkeypatch.setattr(p1_solution, "call_model_json", fake)
     problem = Problem(
         assignment_id=Assignment(label="hw", title="HW", type="math").id,
         label="not-a-fixture-label", statement="Solve for y: y + 1 = 10.", points_possible=5,
@@ -274,7 +310,10 @@ def test_develop_solution_grounds_prompt_in_the_retrieved_method(monkeypatch):
 
 
 def test_develop_solution_trusts_the_sample_when_generation_agrees(monkeypatch):
-    monkeypatch.setattr(p1_solution, "call_model", _fake_call_model("work...\nFinal answer: x = 2"))
+    monkeypatch.setattr(
+        p1_solution, "call_model_json",
+        _fake_call_model_json({"solution": "work...", "final_answer": "x = 2"}),
+    )
     problem = Problem(
         assignment_id=Assignment(label="hw", title="HW", type="math").id,
         label="not-a-fixture-label", statement="Solve for x: 2x + 6 = 10.", points_possible=5,
@@ -289,7 +328,10 @@ def test_develop_solution_trusts_the_sample_when_generation_agrees(monkeypatch):
 
 
 def test_develop_solution_flags_disagreement_with_the_sample_for_human_review(monkeypatch):
-    monkeypatch.setattr(p1_solution, "call_model", _fake_call_model("work...\nFinal answer: x = 3"))
+    monkeypatch.setattr(
+        p1_solution, "call_model_json",
+        _fake_call_model_json({"solution": "work...", "final_answer": "x = 3"}),
+    )
     problem = Problem(
         assignment_id=Assignment(label="hw", title="HW", type="math").id,
         label="not-a-fixture-label", statement="Solve for x: 2x + 6 = 10.", points_possible=5,
@@ -304,7 +346,9 @@ def test_develop_solution_flags_disagreement_with_the_sample_for_human_review(mo
 
 
 def test_develop_solution_falls_back_to_the_sample_when_generation_yields_no_answer(monkeypatch):
-    monkeypatch.setattr(p1_solution, "call_model", _fake_call_model("no clear final line here"))
+    # No parseable "solution" key at all -- e.g. the offline stub's fallback
+    # shape, which has no "solution"/"final_answer" keys.
+    monkeypatch.setattr(p1_solution, "call_model_json", _fake_call_model_json({"version": 1, "criteria": "n/a"}))
     problem = Problem(
         assignment_id=Assignment(label="hw", title="HW", type="math").id,
         label="not-a-fixture-label", statement="Solve for x: 2x + 6 = 10.", points_possible=5,
@@ -351,11 +395,10 @@ def test_self_consistency_skips_instead_of_false_disagreeing_on_a_proof(monkeypa
     monkeypatch.setenv("MODEL_PROVIDER", "openai")
     monkeypatch.setenv("MODEL_API_KEY", "fake-key-for-test")
     monkeypatch.setattr(
-        p1_solution, "call_model",
-        lambda prompt, max_tokens=512: (
-            "Suppose x is odd; then x^2 is odd, contradicting the premise, so x is even.\n"
-            "Final answer: x must be even (proof by contradiction)."
-        ),
+        p1_solution, "call_model_json",
+        lambda prompt, max_tokens=512: {
+            "final_answer": "x must be even (proof by contradiction), since x odd implies x^2 odd."
+        },
     )
     problem = Problem(
         assignment_id=Assignment(label="hw", title="HW", type="math").id,
