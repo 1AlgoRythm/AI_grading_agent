@@ -5,6 +5,11 @@ services:
       - "8501:8501"
     environment:
       DATABASE_URL: postgresql+psycopg://grading:grading@db:5432/grading
+      MODEL_PROVIDER: ${MODEL_PROVIDER:-}
+      MODEL_NAME: ${MODEL_NAME:-}
+      MODEL_API_KEY: ${MODEL_API_KEY:-}
+      CRITIC_MODEL_NAME: ${CRITIC_MODEL_NAME:-}
+      CRITIC_TEMPERATURE: ${CRITIC_TEMPERATURE:-}
     depends_on:
       db:
         condition: service_healthy

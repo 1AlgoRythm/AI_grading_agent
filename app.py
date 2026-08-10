@@ -18,6 +18,8 @@ Run with: ``streamlit run app.py``
 """
 from __future__ import annotations
 
+import os
+
 import streamlit as st
 
 import p1_app
@@ -36,6 +38,8 @@ def main() -> None:
     st.sidebar.title("AI Grading Agent")
     page = st.sidebar.radio("Screen", list(PAGES.keys()))
     st.sidebar.divider()
+    if not (os.getenv("MODEL_PROVIDER") and os.getenv("MODEL_API_KEY")):
+        st.sidebar.warning("No BYOK model configured — running deterministic offline fallbacks.")
     PAGES[page]()
 
 

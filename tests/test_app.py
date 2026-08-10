@@ -49,3 +49,27 @@ def test_grading_on_the_upload_tab_is_immediately_visible_on_the_other_tabs(tmp_
     # And switching back doesn't blow up either.
     at.sidebar.radio[0].set_value("Upload & Rubric").run()
     assert any(b.label == "Ingest assignment" for b in at.button)
+
+
+def test_no_byok_configured_shows_a_loud_sidebar_warning(tmp_path, monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'app.db'}")
+    monkeypatch.delenv("MODEL_PROVIDER", raising=False)
+    monkeypatch.delenv("MODEL_API_KEY", raising=False)
+    from streamlit.testing.v1 import AppTest
+
+    at = AppTest.from_file(APP_PATH)
+    at.run()
+
+    assert any("offline fallback" in w.value.lower() for w in at.sidebar.warning)
+
+
+def test_byok_configured_suppresses_the_sidebar_warning(tmp_path, monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'app.db'}")
+    monkeypatch.setenv("MODEL_PROVIDER", "openai")
+    monkeypatch.setenv("MODEL_API_KEY", "fake-key-for-test")
+    from streamlit.testing.v1 import AppTest
+
+    at = AppTest.from_file(APP_PATH)
+    at.run()
+
+    assert not any("offline fallback" in w.value.lower() for w in at.sidebar.warning)
