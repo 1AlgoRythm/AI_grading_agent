@@ -78,6 +78,22 @@ def _list_textbook_sources() -> list[tuple[Path, str]]:
     return sources
 
 
+_INDEX_CACHE: dict[str, object] = {}
+
+
+def _corpus_fingerprint(sources: list[tuple[Path, str]]) -> str:
+    """Cheap change-detector over the on-disk corpus (mtime + size per file)
+    so re-indexing only happens when the corpus actually changed."""
+    parts = []
+    for path, _ in sources:
+        try:
+            stat = path.stat()
+            parts.append(f"{path}:{stat.st_mtime_ns}:{stat.st_size}")
+        except OSError:
+            parts.append(f"{path}:missing")
+    return hashlib.md5("|".join(parts).encode("utf8")).hexdigest()
+
+
 def _index_textbook_with_chroma() -> tuple[object | None, list[tuple[Path, str]]]:
     try:
         import chromadb
@@ -87,6 +103,18 @@ def _index_textbook_with_chroma() -> tuple[object | None, list[tuple[Path, str]]
     sources = _list_textbook_sources()
     if not sources:
         return None, []
+
+    # Without this, every retrieve_method_from_textbook call re-read,
+    # re-chunked, re-embedded, and re-upserted the ENTIRE corpus -- fine for
+    # one small algebra.txt file, but a real (e.g. CLRS-sized) corpus turns
+    # every "Develop solution" click into a many-second re-index. The
+    # in-process cache handles repeated calls within one run; the on-disk
+    # fingerprint stamp handles a fresh process (container restart) not
+    # re-indexing an unchanged corpus. Editing a textbook file changes its
+    # mtime/size, so both invalidate automatically.
+    fingerprint = _corpus_fingerprint(sources)
+    if _INDEX_CACHE.get("fingerprint") == fingerprint and _INDEX_CACHE.get("collection") is not None:
+        return _INDEX_CACHE["collection"], sources
 
     persist_dir = Path(os.getcwd()) / ".p1_textbook_index"
     client = chromadb.PersistentClient(path=str(persist_dir))
@@ -100,19 +128,28 @@ def _index_textbook_with_chroma() -> tuple[object | None, list[tuple[Path, str]]
         metadata={"lane": "p1", "index": "textbook"},
     )
 
-    documents: list[str] = []
-    metadatas: list[dict[str, str]] = []
-    ids: list[str] = []
-    embeddings: list[list[float]] = []
-    for path, content in sources:
-        for chunk_index, chunk in enumerate(_chunk_text(content), start=1):
-            documents.append(chunk)
-            metadatas.append({"path": str(path), "chunk": str(chunk_index)})
-            ids.append(f"{path.name}:{chunk_index}")
-            embeddings.append(_hash_embedding(chunk))
+    stamp = persist_dir / ".fingerprint"
+    already_indexed = stamp.exists() and stamp.read_text(encoding="utf8").strip() == fingerprint
 
-    if documents:
-        collection.upsert(ids=ids, documents=documents, metadatas=metadatas, embeddings=embeddings)
+    if not already_indexed:
+        documents: list[str] = []
+        metadatas: list[dict[str, str]] = []
+        ids: list[str] = []
+        embeddings: list[list[float]] = []
+        for path, content in sources:
+            for chunk_index, chunk in enumerate(_chunk_text(content), start=1):
+                documents.append(chunk)
+                metadatas.append({"path": str(path), "chunk": str(chunk_index)})
+                ids.append(f"{path.name}:{chunk_index}")
+                embeddings.append(_hash_embedding(chunk))
+
+        if documents:
+            collection.upsert(ids=ids, documents=documents, metadatas=metadatas, embeddings=embeddings)
+        persist_dir.mkdir(parents=True, exist_ok=True)
+        stamp.write_text(fingerprint, encoding="utf8")
+
+    _INDEX_CACHE["fingerprint"] = fingerprint
+    _INDEX_CACHE["collection"] = collection
     return collection, sources
 
 
@@ -128,10 +165,17 @@ def retrieve_method_from_textbook(problem_statement: str) -> Optional[str]:
     if collection is not None:
         try:
             query_embedding = _hash_embedding(problem_statement)
-            result = collection.query(query_embeddings=[query_embedding], n_results=1)
-            documents = result.get("documents", [[]])
-            if documents and documents[0]:
-                return documents[0][0].strip()
+            result = collection.query(query_embeddings=[query_embedding], n_results=3)
+            documents = result.get("documents", [[]])[0]
+            metadatas = result.get("metadatas", [[]])[0] or [{}] * len(documents)
+            if documents:
+                # Source-labeled so it's visible which chunk(s) grounded the
+                # rubric, not just an unattributed blob of retrieved text.
+                parts = []
+                for doc, meta in zip(documents, metadatas):
+                    source_name = Path(str(meta.get("path", "textbook"))).name
+                    parts.append(f"[{source_name}]\n{doc.strip()}")
+                return "\n\n".join(parts)
         except Exception:
             # Fall back to the deterministic scorer below.
             pass
