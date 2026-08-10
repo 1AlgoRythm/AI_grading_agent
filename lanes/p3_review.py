@@ -80,6 +80,11 @@ def override_problem_score(
     problem_grade.evidence = f"{problem_grade.evidence} Human override: {reason}".strip()
     grade.resolution = GradeResolution.HUMAN_OVERRIDDEN
     grade.approver_id = approver_id
+    # finalize() refuses an escalated grade -- and nothing ever cleared the
+    # flag, so an escalated grade was a permanent dead end with no path to
+    # approval. The human judgment the escalation was asking for has now
+    # been made.
+    grade.escalated = False
     audit_log.append(OverrideAuditEntry(
         id=uuid4(), grade_id=grade.id, problem_id=problem_id,
         approver_id=approver_id, previous_points=previous, new_points=adjusted,
