@@ -159,7 +159,11 @@ def draft_rubric(assignment: Assignment, method_context: dict) -> Rubric:
             if method_snippet:
                 # Bake the retrieved course method into the rubric itself (retrieval
                 # happens only here, at rubric-design time — never at grading time).
-                method_description += f" Method from course material: {method_snippet}"
+                # Capped: build_context sums this into estimated_tokens against
+                # DEFAULT_TOKEN_BUDGET, and multiple criteria/problems each carry
+                # their own snippet -- an uncapped textbook excerpt (a CLRS
+                # section is much larger than algebra.txt) could blow the budget.
+                method_description += f" Method from course material: {method_snippet[:800]}"
             generated_criteria.append({
                 "problem_id": p.id,
                 "name": "Method / shown work",

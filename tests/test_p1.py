@@ -161,6 +161,44 @@ def test_retrieve_method_uses_textbook_folder(tmp_path, monkeypatch):
     assert "expand squares" in snippet.lower()
 
 
+def test_retrieve_method_returns_multiple_sources_with_labels(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    p1_rag._INDEX_CACHE.clear()
+    textbook = tmp_path / "textbook"
+    textbook.mkdir()
+    (textbook / "algebra.txt").write_text("To expand squares, use (a+b)^2 = a^2 + 2ab + b^2.", encoding="utf8")
+    (textbook / "greedy.txt").write_text(
+        "Exchange argument: replace the first interval of any optimal solution "
+        "with the earliest-finishing interval; feasibility and optimality are preserved.",
+        encoding="utf8",
+    )
+
+    snippet = p1_rag.retrieve_method_from_textbook("Prove the greedy exchange argument preserves optimality")
+
+    assert snippet is not None
+    assert "[greedy.txt]" in snippet
+    assert "[algebra.txt]" in snippet  # top-3 -- both small files should appear
+
+
+def test_textbook_index_is_cached_across_calls(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    p1_rag._INDEX_CACHE.clear()
+    textbook = tmp_path / "textbook"
+    textbook.mkdir()
+    (textbook / "algebra.txt").write_text("To expand squares, use (a+b)^2 = a^2 + 2ab + b^2.", encoding="utf8")
+
+    collection1, _ = p1_rag._index_textbook_with_chroma()
+    collection2, _ = p1_rag._index_textbook_with_chroma()
+    assert collection1 is collection2
+
+    # Editing the file changes its mtime/size -> fingerprint -> cache miss ->
+    # re-index. The behavioral guarantee that actually matters: the change is
+    # reflected, not silently served from a stale cached index.
+    (textbook / "algebra.txt").write_text("Something completely different now.", encoding="utf8")
+    snippet = p1_rag.retrieve_method_from_textbook("Something completely different now.")
+    assert snippet is not None and "completely different" in snippet.lower()
+
+
 def test_verify_solution_confirms_a_correct_equation_via_substitution(monkeypatch):
     monkeypatch.delenv("MODEL_PROVIDER", raising=False)
     monkeypatch.delenv("MODEL_API_KEY", raising=False)
@@ -345,6 +383,22 @@ def test_draft_rubric_points_the_rubric_at_the_real_assignment_not_the_fixture()
     rubric = p1_solution.draft_rubric(assignment, {})
 
     assert rubric.assignment_id == assignment.id
+
+
+def test_draft_rubric_caps_the_embedded_textbook_snippet():
+    # build_context sums the rubric criteria descriptions into
+    # estimated_tokens against DEFAULT_TOKEN_BUDGET -- an uncapped textbook
+    # excerpt (a real corpus section is much larger than algebra.txt) could
+    # blow the budget once baked into every problem's criteria.
+    assignment = Assignment(label="hw-real", title="Real HW", type="math")
+    problem = Problem(assignment_id=assignment.id, label="Q1", statement="Solve x + 2 = 5", points_possible=5)
+    assignment.problems.append(problem)
+    long_snippet = "x" * 5000
+
+    rubric = p1_solution.draft_rubric(assignment, {problem.id: long_snippet})
+
+    method_criterion = next(c for c in rubric.criteria if "Method from course material" in c.description)
+    assert len(method_criterion.description) < 1000
 
 
 def test_draft_rubric_gives_each_assignment_its_own_rubric_id(tmp_path):
