@@ -2,7 +2,7 @@
 ## Detailed Project Plan & End-to-End Development Guide
 *Three-person team · parallel build · open-source · BYOK*
 
-> **Current status (implementation note).** The repository root folder is `seam/` (not `grading_agent/`). The walking skeleton described in §9 is built and green — it runs the full ingest → solution → rubric → context → grade → feedback → approve path end to end, is version-controlled, and pushed to GitHub. Per the build order in §5, the grading step currently runs a **solo grader**; the independent critic is deferred and added as a layer once the solo grader is solid. Where this plan and the code differ on a detail, the code is the source of truth.
+> **Current status (implementation note).** The repository root folder is `seam/` (not `grading_agent/`). The walking skeleton described in §9 is built and green — it runs the full ingest → solution → rubric → context → grade → feedback → approve path end to end, is version-controlled, and pushed to GitHub. Per the build order in §5, the grader was built solo first; **the independent critic is now built too** — grader + adversarial critic + bounded one-revision reconciliation, escalating to human review on persistent disagreement (`lanes/p2_grader.py`, `lanes/p2_critic.py`, `lanes/p2_engine.py`). P1, P2, and P3 each have a real Streamlit screen backed by a shared database (`P1Store`/`P2Store`/`P3Store`), unified into one deployed app (`app.py`) so the full pipeline — not just review — is reachable once deployed. CI (`.github/workflows/ci.yml`) runs the walking skeleton and the test suite on every push/PR. Where this plan and the code differ on a detail, the code is the source of truth.
 
 ---
 
@@ -144,14 +144,20 @@ For each problem, the grader's context is assembled by `build_context(problem, s
 | Layer | Choice | Why |
 |---|---|---|
 | Language | Python | First-class libraries for parsing, math, and LLM SDKs. |
-| Backend / API | FastAPI (async) | Async is needed for concurrent batch grading. |
+| Backend | Streamlit only, no separate API tier | See note below — the three lane screens share one database directly. |
 | System of record | PostgreSQL + SQLAlchemy | Durable, auditable rubrics, grades, and override log. |
-| Retrieval (if corpus) | Chroma or pgvector | Used only by P1 at rubric-design time; pgvector keeps it in one DB. |
+| Retrieval (if corpus) | Chroma | Used only by P1 at rubric-design time. See note below on why not pgvector. |
 | Verification tool | SymPy (math, first type) | Deterministic equivalence checking behind the tool interface. |
 | Model access | BYOK provider module | Key + model from config; provider-agnostic; supports local models. |
-| Frontend | Streamlit | Fast pure-Python UI so effort goes into the pipeline, not plumbing. |
-| Packaging | Docker Compose | One command brings up API + Postgres (+ vector store). |
+| Frontend | Streamlit, unified into one multi-page app (`app.py`) | One deployed service reaches the whole pipeline, not just review. |
+| Packaging | Docker Compose | One command brings up the app + Postgres. |
 | License | MIT | Open source, as directed. |
+
+> **Amended from the original plan (was: FastAPI + Chroma-or-pgvector).** Two deliberate mismatches between this plan's original ambition and the shipped code, resolved in the plan's favor of what actually runs end to end:
+> - **No FastAPI.** P1/P2/P3 don't need to call each other over HTTP — they already share one Postgres instance (`P1Store`/`P2Store`/`P3Store`), which is a working integration layer on its own. Standing up a separate API tier (and, worse, splitting the three screens into separately-deployed services) would have meant three deployments, inter-service config, and network calls to solve a problem a shared database already solves — real complexity added for no corresponding benefit at this project's scale, and the opposite of the instructor's "don't add anything extra." Async batch grading (the original justification for FastAPI) is handled inside P2's own grading engine directly, not via an HTTP layer.
+> - **Chroma, not pgvector.** Chroma is simpler to stand up for a P1-only, rubric-design-time concern (no Postgres extension to enable, works fully offline), and the retrieval corpus here is small enough that pgvector's "keep it in one DB" advantage doesn't outweigh that simplicity.
+>
+> A Streamlit-only stack that actually runs end to end beats a half-built API layer.
 
 ---
 
@@ -302,12 +308,12 @@ Docker Compose brings up the FastAPI service, Postgres, and the vector store (if
 
 ---
 
-## 16. Open Questions to Confirm with the Instructor
+## 16. Open Questions — Resolved with the Team
 
-- Does "have docs" mean documents to ingest, project documentation, or both?
-- Is an AI-developed model solution acceptable as the grading basis when no sample exists, given the human-approval gate — or should the solution always be human-authored (making solution development a draft-assist)?
-- Does the independent critic read as a welcome safety feature, or as 'extra' to be cut under "don't add anything extra"?
-- Do the assignments reference a specific textbook the grading should follow (making textbook retrieval core), or are problems self-contained?
+- **"Have docs"** — means project/code documentation (README + docstrings), not ingested course documents. Already largely true (README, docstrings throughout); a dedicated completeness pass is a fair follow-up, not yet done.
+- **AI-developed model solutions** — acceptable as the grading basis when no sample exists, gated on human approval (as already built). The generated solution should be checked for missing/wrong points before that approval: `verify_solution` does this via self-consistency (independently re-derive, compare) and substitution (plug the answer back into the equation, check it holds). Note: self-consistency's comparison is SymPy-based, so it only meaningfully applies to short symbolic answers — for free-form answers (a proof, a written explanation), it now explicitly defers to human review rather than reporting a false "disagreement" (fixed; see `_looks_symbolic` in `lanes/p1_solution.py`). A full second-agent adversarial critic for solution-checking (mirroring P2's grader/critic) was considered and deliberately not built — the honest-skip design above was judged sufficient for the committed "simple math" scope, and proof-type verification is a different, larger problem (would need an LLM-as-judge for logical validity, not equivalence checking) that's out of scope unless the project adds a proof assignment type.
+- **The independent critic (grading)** — confirmed a critical feature, not "extra." Built as designed: grader + critic + one bounded revision + escalation on persistent disagreement.
+- **Textbook grounding** — hybrid, not all-or-nothing: the question takes precedence (self-contained correctness by default — any valid method earns full credit). But if the question is specifically testing a taught concept or method, grading should follow that method, and check against the textbook if it prescribes something specific for that concept.
 
 ---
 
