@@ -7,3 +7,4 @@ venv/
 .pytest_cache/
 *.db
 .p1_textbook_index/
+Agent_Plan.md
