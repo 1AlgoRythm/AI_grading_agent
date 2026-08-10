@@ -76,13 +76,18 @@ def _render_upload(store: P1Store) -> None:
 
     uploaded = st.file_uploader("Assignment file (.txt, .md, .ipynb, .pdf)", type=["txt", "md", "ipynb", "pdf"])
     pasted = st.text_area("...or paste the assignment text directly", height=150)
+    assignment_type = st.selectbox(
+        "Assignment type", ["math", "short_answer", "proof"],
+        help="Selects the verification tool. 'math' uses SymPy; the others have no "
+             "objective check, so grades lean on the critic and your approval.",
+    )
 
     if st.button("Ingest assignment", disabled=not (uploaded or pasted.strip())):
         if uploaded is not None:
             source = _write_uploaded_file(uploaded)
         else:
             source = pasted
-        assignment = p1.ingest_assignment(source)
+        assignment = p1.ingest_assignment(source, assignment_type)
         st.session_state.assignment = assignment
         st.session_state.method_context = {}
         st.session_state.rubric = None
@@ -218,7 +223,7 @@ def _render_submission_and_grading(p2_store: P2Store) -> None:
             source = pasted
         submission = p1.ingest_submission(source, assignment=assignment)
         context = p1.build_submission_context(assignment, submission, rubric)
-        grade, trace = p2.grade(submission, rubric, context)
+        grade, trace = p2.grade(submission, rubric, context, assignment.type)
         p2_store.save(grade, trace)
         st.session_state.last_grade = (submission, grade, trace)
         # Stashed alongside so p2_app/p3_app can pick this up from shared
