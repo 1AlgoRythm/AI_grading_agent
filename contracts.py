@@ -137,7 +137,7 @@ class StepKind:
 # Assignment type registry — the one OPEN set (decision 5)
 # --------------------------------------------------------------------------- #
 
-_ASSIGNMENT_TYPES: set[str] = {"math"}
+_ASSIGNMENT_TYPES: set[str] = {"math", "short_answer", "proof"}
 
 
 def register_assignment_type(name: str) -> None:
