@@ -28,5 +28,10 @@ __all__ = [
 ]
 
 
-def grade(submission: Submission, rubric: Rubric, context: SubmissionContext) -> tuple[Grade, Trace]:
-    return grade_submission(submission, rubric, context)
+def grade(
+    submission: Submission,
+    rubric: Rubric,
+    context: SubmissionContext,
+    assignment_type: str = "math",
+) -> tuple[Grade, Trace]:
+    return grade_submission(submission, rubric, context, assignment_type)

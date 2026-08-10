@@ -87,6 +87,22 @@ def _offline_fallback(context: GradingContext, grader_result: GraderResult) -> C
     independent finding. This is a separate computation from the grader's
     fallback, not a mirror of its boolean result.
     """
+    if grader_result.rationale == "Offline fallback: unverifiable answer type, deferring to human review.":
+        # The grader's own placeholder for "no objective check applies and no
+        # real model judged the reasoning" -- there is no substantive
+        # judgment behind this score to agree with. Disagreeing (rather than
+        # rubber-stamping a placeholder) is what correctly routes this to
+        # the bounded revision round and then escalation, instead of a
+        # placeholder score silently becoming the final grade.
+        return CriticResult(
+            agrees=False,
+            critique=(
+                "The proposed score is a placeholder -- no objective check applies to this "
+                "answer type and no BYOK model evaluated the reasoning. This requires a human "
+                "judgment, not an unexamined half-credit default."
+            ),
+        )
+
     work = " ".join((context.student_work or "").lower().split())
     matched_signal = None
     for criterion in context.rubric_criteria:

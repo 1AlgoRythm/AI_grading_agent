@@ -39,7 +39,7 @@ from contracts import (
 )
 from lanes.p2_critic import run_critic
 from lanes.p2_grader import run_grader
-from lanes.p2_verify import verify
+from lanes.p2_tools import verify_verdict
 
 
 def _grade_one_problem(
@@ -48,6 +48,7 @@ def _grade_one_problem(
     ctx: Optional[GradingContext],
     possible: float,
     steps: list[Step],
+    assignment_type: str = "math",
 ) -> tuple[ProblemGrade, int]:
     tag = problem_id.hex[-2:]
 
@@ -73,7 +74,7 @@ def _grade_one_problem(
             critic_agreement=None,
         ), 0
 
-    matched = verify(final, ctx.reference_answer or "", ctx.problem_statement)
+    matched = verify_verdict(final, ctx.reference_answer or "", ctx.problem_statement, assignment_type)
     steps.append(Step(type=StepKind.ACT, data={
         "tool": "verify",
         "problem": tag,
@@ -81,6 +82,7 @@ def _grade_one_problem(
         "final_answer": final,
         "reference": ctx.reference_answer,
         "matched": matched,
+        "verdict": {True: "confirmed", False: "contradicted", None: "not_applicable"}[matched],
     }))
 
     result = run_grader(ctx, matched)
@@ -91,7 +93,7 @@ def _grade_one_problem(
         "rationale": result.rationale,
     }))
 
-    if matched:
+    if matched is True:
         # Objective, tool-checked answer: nothing subjective to critique.
         critic_agrees: Optional[bool] = True
         revisions = 0
@@ -141,7 +143,12 @@ def _grade_one_problem(
     return problem_grade, revisions
 
 
-def grade_submission(submission: Submission, rubric: Rubric, context: SubmissionContext) -> tuple[Grade, Trace]:
+def grade_submission(
+    submission: Submission,
+    rubric: Rubric,
+    context: SubmissionContext,
+    assignment_type: str = "math",
+) -> tuple[Grade, Trace]:
     problem_grades: list[ProblemGrade] = []
     steps: list[Step] = []
     start = time.perf_counter()
@@ -152,7 +159,9 @@ def grade_submission(submission: Submission, rubric: Rubric, context: Submission
         possible = ctx.points_possible if ctx else 0.0
         final = (ans.final_answer or "").strip()
 
-        problem_grade, revisions = _grade_one_problem(ans.problem_id, final, ctx, possible, steps)
+        problem_grade, revisions = _grade_one_problem(
+            ans.problem_id, final, ctx, possible, steps, assignment_type
+        )
         problem_grades.append(problem_grade)
         total_revisions += revisions
 
