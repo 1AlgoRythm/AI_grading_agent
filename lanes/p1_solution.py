@@ -11,7 +11,7 @@ import re
 from typing import Optional
 
 import fixtures
-from contracts import ArtifactStatus, Problem, Assignment, Rubric, SolutionSource
+from contracts import ArtifactStatus, Problem, Assignment, Rubric, SolutionSource, new_id
 from model_provider import call_model, call_model_json
 from lanes.p2_verify import check_equivalence
 
@@ -93,7 +93,12 @@ def develop_solution(
         ref = {p.label: p for p in fixtures.sample_assignment().problems}[problem.label]
     except Exception:
         ref = None
-    if ref:
+    # Only take the demo-fixture shortcut when no real model is configured.
+    # With a real key, a problem that happens to be labeled Q1/Q2 (the
+    # default auto-label for the 1st/2nd numbered problem in ANY assignment)
+    # would otherwise silently get the fixture's canned answer instead of a
+    # real one -- looking "brilliantly solved" while never touching the key.
+    if ref and not _model_configured():
         problem.reference_solution = ref.reference_solution
         problem.reference_answer = ref.reference_answer
         problem.solution_source = SolutionSource.GENERATED
@@ -108,10 +113,13 @@ def develop_solution(
 
 def draft_rubric(assignment: Assignment, method_context: dict) -> Rubric:
     r = fixtures.sample_rubric()
-    # `sample_rubric()` carries the *fixture's* assignment_id -- must be
-    # repointed at the real assignment, or generate_feedback (and anything
-    # else that cross-checks grade.assignment_id == rubric.assignment_id)
-    # breaks for every assignment except the one matching the fixture's id.
+    # sample_rubric() carries the *fixture's* own id and assignment_id --
+    # both must be repointed at a fresh id / the real assignment. Leaving
+    # `id` as the fixture's meant every drafted rubric for every assignment
+    # shared the same primary key: P1Store.save_rubric merges on `id` and
+    # deletes criteria by rubric_id, so drafting a second assignment's
+    # rubric silently overwrote the first one's row and wiped its criteria.
+    r.id = new_id()
     r.assignment_id = assignment.id
     method_snippets = []
     for pid, snippet in method_context.items():
