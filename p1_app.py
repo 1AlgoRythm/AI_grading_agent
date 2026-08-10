@@ -216,6 +216,9 @@ def _render_submission_and_grading(p2_store: P2Store) -> None:
         grade, trace = p2.grade(submission, rubric, context)
         p2_store.save(grade, trace)
         st.session_state.last_grade = (submission, grade, trace)
+        # Stashed alongside so p2_app/p3_app can pick this up from shared
+        # st.session_state with zero DB reads, not just the grade/trace.
+        st.session_state.last_grade_rubric = rubric
         st.success(
             f"Graded '{submission.student_label}': {grade.total_awarded:g}/{grade.total_possible:g} "
             f"({grade.fraction:.0%}). Persisted grade {grade.id} for submission {submission.id}."
@@ -240,8 +243,7 @@ def _render_submission_and_grading(p2_store: P2Store) -> None:
             st.write(f"- submission {g.submission_id}: grade {g.id} — {g.total_awarded:g}/{g.total_possible:g}")
 
 
-def main() -> None:
-    st.set_page_config(page_title="AI Grading Agent — P1 Ingestion & Rubric", layout="wide")
+def render() -> None:
     st.title("AI Grading Agent")
     st.caption("P1 — ingestion, retrieval, solution development, and rubric drafting")
 
@@ -264,4 +266,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    st.set_page_config(page_title="AI Grading Agent — P1 Ingestion & Rubric", layout="wide")
+    render()

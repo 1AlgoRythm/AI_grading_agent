@@ -38,16 +38,34 @@ STEP_ICONS = {
 
 
 def _initialize_demo() -> None:
-    if "p2_grade" not in st.session_state:
-        submission = fixtures.sample_submission()
-        rubric = fixtures.sample_rubric()
-        context = fixtures.sample_submission_context()
-        grade, trace = p2.grade(submission, rubric, context)
-
+    if "p2_store" not in st.session_state:
         st.session_state.p2_store = P2Store(os.getenv("DATABASE_URL", "sqlite:///grading_demo.db"))
-        st.session_state.p2_store.save(grade, trace)
-        st.session_state.p2_grade = grade
-        st.session_state.p2_trace = trace
+
+    # Prefer a grade already produced this session on the P1 tab (shared
+    # st.session_state -- no DB round-trip needed) over a fresh fixture run,
+    # and re-sync whenever a *new* one shows up there (by grade.id), so
+    # grading a real submission on tab 1 shows up here immediately even if
+    # this tab was already open with an older/fixture grade loaded.
+    last = st.session_state.get("last_grade")
+    if last is not None:
+        _, grade, trace = last
+        if st.session_state.get("p2_grade_id") != grade.id:
+            st.session_state.p2_grade = grade
+            st.session_state.p2_trace = trace
+            st.session_state.p2_grade_id = grade.id
+        return
+
+    if "p2_grade" in st.session_state:
+        return
+
+    submission = fixtures.sample_submission()
+    rubric = fixtures.sample_rubric()
+    context = fixtures.sample_submission_context()
+    grade, trace = p2.grade(submission, rubric, context)
+    st.session_state.p2_store.save(grade, trace)
+    st.session_state.p2_grade = grade
+    st.session_state.p2_trace = trace
+    st.session_state.p2_grade_id = grade.id
 
 
 def _render_trace() -> None:
@@ -108,8 +126,7 @@ def _render_problem_panel(index: int) -> None:
                 st.rerun()
 
 
-def main() -> None:
-    st.set_page_config(page_title="AI Grading Agent — P2 Trace Review", layout="wide")
+def render() -> None:
     _initialize_demo()
     grade = st.session_state.p2_grade
 
@@ -132,4 +149,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    st.set_page_config(page_title="AI Grading Agent — P2 Trace Review", layout="wide")
+    render()
