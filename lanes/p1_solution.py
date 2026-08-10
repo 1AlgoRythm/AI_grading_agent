@@ -108,6 +108,11 @@ def develop_solution(
 
 def draft_rubric(assignment: Assignment, method_context: dict) -> Rubric:
     r = fixtures.sample_rubric()
+    # `sample_rubric()` carries the *fixture's* assignment_id -- must be
+    # repointed at the real assignment, or generate_feedback (and anything
+    # else that cross-checks grade.assignment_id == rubric.assignment_id)
+    # breaks for every assignment except the one matching the fixture's id.
+    r.assignment_id = assignment.id
     method_snippets = []
     for pid, snippet in method_context.items():
         if snippet:
@@ -193,12 +198,29 @@ def _self_consistency_check(problem: Problem) -> Optional[tuple[bool, str]]:
             break
     if not rederived:
         return None
+    if not _looks_symbolic(problem.reference_answer or "") or not _looks_symbolic(rederived):
+        # check_equivalence is SymPy-backed: it can't parse free-form prose
+        # (a proof, a written explanation), and would silently return False
+        # for two answers that are both correct but worded differently --
+        # reporting that as "disagrees" would be a false, misleading signal,
+        # worse than just admitting this check doesn't apply here.
+        return None
     agrees = check_equivalence(problem.reference_answer or "", rederived)
     note = (
         f"Self-consistency re-derivation {'agrees' if agrees else 'disagrees'} with "
         f"the proposed answer (got {rederived!r})."
     )
     return agrees, note
+
+
+def _looks_symbolic(text: str) -> bool:
+    """Best-effort check for a short symbolic expression (equivalence
+    checking can meaningfully compare these) vs. free-form prose like a
+    proof or written explanation (it can't)."""
+    stripped = text.strip()
+    if not stripped or len(stripped.split()) > 12:
+        return False
+    return bool(re.search(r"[0-9=+\-*/^]", stripped))
 
 
 def _prep_expr(expr: str) -> str:
@@ -256,8 +278,16 @@ def verify_solution(problem: Problem) -> tuple[bool, str]:
         agrees, note = consistency
         ok = ok and agrees
         notes.append(note)
-    else:
+    elif not _model_configured():
         notes.append("Self-consistency check skipped (no BYOK model provider configured).")
+    elif not _looks_symbolic(problem.reference_answer or ""):
+        notes.append(
+            "Self-consistency check skipped: the reference answer is free-form prose "
+            "(e.g. a proof or written explanation), not a short symbolic expression "
+            "equivalence checking can meaningfully compare -- rely on human review here."
+        )
+    else:
+        notes.append("Self-consistency check skipped: no comparable answer was re-derived.")
 
     substitution = _substitution_check(problem.statement, problem.reference_answer)
     if substitution is not None:
