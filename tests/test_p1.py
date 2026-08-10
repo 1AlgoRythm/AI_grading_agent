@@ -201,6 +201,26 @@ def _fake_call_model(response: str):
     return _fake
 
 
+def test_develop_solution_ignores_the_fixture_shortcut_when_a_real_model_is_configured(monkeypatch):
+    # The fixture shortcut matches by label (Q1/Q2 -- the default auto-label
+    # for the 1st/2nd numbered problem in ANY assignment). With a real key
+    # configured, hitting that shortcut would silently return the canned
+    # fixture answer instead of a real one for an unrelated problem that
+    # merely happens to be labeled Q1/Q2 -- looking "solved" without ever
+    # touching the model.
+    monkeypatch.setenv("MODEL_PROVIDER", "openai")
+    monkeypatch.setenv("MODEL_API_KEY", "fake-key-for-test")
+    monkeypatch.setattr(p1_solution, "call_model", _fake_call_model("Some derivation.\nFinal answer: 999"))
+    problem = Problem(
+        assignment_id=Assignment(label="hw", title="HW", type="math").id,
+        label="Q1", statement="A totally different problem than the fixture's Q1", points_possible=5,
+    )
+
+    p1_solution.develop_solution(problem)
+
+    assert problem.reference_answer == "999"
+
+
 def test_develop_solution_grounds_prompt_in_the_retrieved_method(monkeypatch):
     fake = _fake_call_model("Some derivation.\nFinal answer: 9")
     monkeypatch.setattr(p1_solution, "call_model", fake)
@@ -325,6 +345,31 @@ def test_draft_rubric_points_the_rubric_at_the_real_assignment_not_the_fixture()
     rubric = p1_solution.draft_rubric(assignment, {})
 
     assert rubric.assignment_id == assignment.id
+
+
+def test_draft_rubric_gives_each_assignment_its_own_rubric_id(tmp_path):
+    # sample_rubric() also carries the fixture's own rubric id. Reusing it
+    # for every assignment meant P1Store.save_rubric (merge on id, delete
+    # criteria by rubric_id) silently overwrote and wiped a prior
+    # assignment's rubric the moment a second one was drafted and saved.
+    from lanes.p1_storage import P1Store
+
+    store = P1Store(f"sqlite:///{tmp_path / 'p1.db'}")
+
+    a1 = Assignment(label="hw1", title="HW1", type="math")
+    r1 = p1_solution.draft_rubric(a1, {})
+    r1.status = ArtifactStatus.APPROVED
+    store.save_rubric(r1)
+
+    a2 = Assignment(label="hw2", title="HW2", type="math")
+    r2 = p1_solution.draft_rubric(a2, {})
+    r2.status = ArtifactStatus.APPROVED
+    store.save_rubric(r2)
+
+    assert r1.id != r2.id
+    reloaded_r1 = store.load_rubric_for_assignment(a1.id)
+    assert reloaded_r1 is not None
+    assert reloaded_r1.id == r1.id
 
 
 def _approved_problem_and_rubric(assignment):
