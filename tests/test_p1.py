@@ -286,6 +286,47 @@ def test_verify_solution_skips_gracefully_when_it_cannot_parse_the_problem(monke
     assert "No verification could be performed" in note
 
 
+def test_self_consistency_skips_instead_of_false_disagreeing_on_a_proof(monkeypatch):
+    # A proof re-derived in different words is not SymPy-comparable -- it
+    # must not be reported as "disagrees" (a false, misleading signal); it
+    # should honestly say this check doesn't apply here.
+    monkeypatch.setenv("MODEL_PROVIDER", "openai")
+    monkeypatch.setenv("MODEL_API_KEY", "fake-key-for-test")
+    monkeypatch.setattr(
+        p1_solution, "call_model",
+        lambda prompt, max_tokens=512: (
+            "Suppose x is odd; then x^2 is odd, contradicting the premise, so x is even.\n"
+            "Final answer: x must be even (proof by contradiction)."
+        ),
+    )
+    problem = Problem(
+        assignment_id=Assignment(label="hw", title="HW", type="math").id,
+        label="Q1", statement="Prove that if x^2 is even, then x is even.", points_possible=5,
+        reference_answer="If x is even, x = 2k, so x^2 = 4k^2 is even; the converse follows similarly.",
+        reference_solution="Direct proof by cases on parity of x.",
+    )
+
+    ok, note = p1_solution.verify_solution(problem)
+
+    assert "disagrees" not in note
+    assert "free-form prose" in note
+
+
+def test_draft_rubric_points_the_rubric_at_the_real_assignment_not_the_fixture():
+    # sample_rubric() (draft_rubric's starting point) carries the fixture's
+    # own assignment_id; a real, non-fixture assignment must not inherit it,
+    # or anything cross-checking grade.assignment_id == rubric.assignment_id
+    # (e.g. generate_feedback) breaks for every assignment except the one
+    # that happens to match the fixture's id.
+    assignment = Assignment(label="hw-real", title="Real HW", type="math")
+    problem = Problem(assignment_id=assignment.id, label="Q1", statement="Solve x + 2 = 5", points_possible=5)
+    assignment.problems.append(problem)
+
+    rubric = p1_solution.draft_rubric(assignment, {})
+
+    assert rubric.assignment_id == assignment.id
+
+
 def _approved_problem_and_rubric(assignment):
     problem = Problem(assignment_id=assignment.id, label="Q1", statement="Solve x + 2 = 5", points_possible=5)
     problem.solution_status = ArtifactStatus.APPROVED
