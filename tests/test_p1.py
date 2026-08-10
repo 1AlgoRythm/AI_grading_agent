@@ -116,6 +116,39 @@ def test_ingest_submission_maps_answers_to_the_real_assignment_by_label(tmp_path
     assert by_problem[q2.id] == "2"
 
 
+def test_ingest_submission_with_more_blank_line_paragraphs_than_problems_never_orphans_an_answer(tmp_path, monkeypatch):
+    # Regression: a heading-less submission that the paragraph-splitting
+    # fallback breaks into more blocks than the assignment has problems used
+    # to mint a fresh random problem_id for the overflow block(s) -- an id
+    # that could never match a real Problem, which crashed
+    # build_submission_context() with a KeyError far downstream instead of
+    # failing (or degrading) where the mismatch actually happened.
+    monkeypatch.chdir(tmp_path)
+    assignment = Assignment(label="hw", title="HW", type="math")
+    q1 = Problem(assignment_id=assignment.id, label="Q1", statement="s1", points_possible=5)
+    assignment.problems = [q1]
+
+    path = tmp_path / "student.txt"
+    path.write_text(
+        "Work: 2x+6=10, 2x=4\n\nFinal answer: x = 2\n\nExtra scratch work paragraph.",
+        encoding="utf8",
+    )
+
+    submission = p1_io.ingest_submission(str(path), assignment=assignment)
+
+    assert {a.problem_id for a in submission.answers} == {q1.id}
+    assert submission.answers[0].final_answer == "x = 2"
+    assert "Extra scratch work paragraph" in submission.answers[0].work_text
+
+    rubric = Rubric(assignment_id=assignment.id, version=1, status=ArtifactStatus.APPROVED)
+    rubric.criteria = [RubricCriterion(problem_id=q1.id, name="c", description="d", points=5)]
+    q1.reference_solution = "x = 2"
+    q1.solution_status = ArtifactStatus.APPROVED
+
+    context = p1_context.build_submission_context(assignment, submission, rubric)
+    assert len(context.problem_contexts) == 1
+
+
 @pytest.mark.parametrize(
     "injected",
     [

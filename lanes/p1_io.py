@@ -223,13 +223,23 @@ def _build_parsed_assignment(source: str, text: str, assignment_type: str = "mat
     return assignment
 
 
-def _resolve_problem_id(block: str, index: int, assignment: Optional[Assignment]) -> UUID:
+def _resolve_problem_id(block: str, index: int, assignment: Optional[Assignment]) -> Optional[UUID]:
     """Map a parsed submission block to a real problem id when the target
     assignment is known: match by extracted label first (e.g. a block
     literally headed 'Problem 2' -> the assignment's 'Q2'), falling back to
     position when the label doesn't line up. Without an assignment, this
     just returns a fresh placeholder id -- the caller is responsible for
-    remapping it once it knows which assignment the submission belongs to."""
+    remapping it once it knows which assignment the submission belongs to.
+
+    Returns None when the assignment IS known but this block matches none of
+    its problems by label and its position also runs past the number of
+    real problems -- typically a stray heading-less paragraph the fallback
+    in `_split_problem_blocks` split out beyond the assignment's problem
+    count. Returning a freshly minted id here used to be the bug: it built
+    an answer for a problem_id that would never exist in `assignment.problems`,
+    which crashed `build_submission_context` with a `KeyError` far downstream
+    instead of failing where the mismatch actually happened.
+    """
     if assignment is None or not assignment.problems:
         return new_id()
     label = _extract_problem_label(block, index)
@@ -238,7 +248,7 @@ def _resolve_problem_id(block: str, index: int, assignment: Optional[Assignment]
             return problem.id
     if index - 1 < len(assignment.problems):
         return assignment.problems[index - 1].id
-    return new_id()
+    return None
 
 
 def _build_parsed_submission(source: str, text: str, assignment: Optional[Assignment] = None) -> Submission | None:
@@ -247,14 +257,26 @@ def _build_parsed_submission(source: str, text: str, assignment: Optional[Assign
         return None
 
     label = Path(source).stem if _source_path(source) else "student"
-    answers = [
-        SubmissionAnswer(
-            problem_id=_resolve_problem_id(block, index, assignment),
+    answers: list[SubmissionAnswer] = []
+    for index, block in enumerate(blocks, start=1):
+        problem_id = _resolve_problem_id(block, index, assignment)
+        if problem_id is None:
+            # No real problem to attach this to -- fold it into the previous
+            # answer's shown work instead of manufacturing a problem_id no
+            # assignment will ever have. There's always a previous answer by
+            # this point: an in-range block always resolves to a real id above.
+            previous = answers[-1]
+            previous.work_text = _sanitize_text(f"{previous.work_text} {block}")
+            if previous.final_answer is None:
+                previous.final_answer = _extract_final_answer(block)
+            continue
+        answers.append(SubmissionAnswer(
+            problem_id=problem_id,
             work_text=_sanitize_text(block),
             final_answer=_extract_final_answer(block),
-        )
-        for index, block in enumerate(blocks, start=1)
-    ]
+        ))
+    if not answers:
+        return None
     return Submission(
         assignment_id=assignment.id if assignment else new_id(),
         student_label=label,

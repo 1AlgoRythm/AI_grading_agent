@@ -232,19 +232,26 @@ def _render_submission_and_grading(p2_store: P2Store) -> None:
             source = _write_uploaded_file(uploaded)
         else:
             source = pasted
-        submission = p1.ingest_submission(source, assignment=assignment)
-        context = p1.build_submission_context(assignment, submission, rubric)
-        grade, trace = p2.grade(submission, rubric, context, assignment.type)
-        p2_store.save(grade, trace)
-        st.session_state.last_grade = (submission, grade, trace)
-        # Stashed alongside so p2_app/p3_app can pick this up from shared
-        # st.session_state with zero DB reads, not just the grade/trace.
-        st.session_state.last_grade_rubric = rubric
-        st.success(
-            f"Graded '{submission.student_label}': {grade.total_awarded:g}/{grade.total_possible:g} "
-            f"({grade.fraction:.0%}). Persisted grade {grade.id} for submission {submission.id}."
-        )
-        st.rerun()
+        try:
+            submission = p1.ingest_submission(source, assignment=assignment)
+            context = p1.build_submission_context(assignment, submission, rubric)
+            grade, trace = p2.grade(submission, rubric, context, assignment.type)
+        except (ValueError, KeyError) as exc:
+            # Untrusted, free-form upload -- a parsing/mapping mismatch here
+            # is a bad-input case to report, not a reason to crash the app
+            # with a raw traceback.
+            st.error(f"Could not grade this submission: {exc}")
+        else:
+            p2_store.save(grade, trace)
+            st.session_state.last_grade = (submission, grade, trace)
+            # Stashed alongside so p2_app/p3_app can pick this up from shared
+            # st.session_state with zero DB reads, not just the grade/trace.
+            st.session_state.last_grade_rubric = rubric
+            st.success(
+                f"Graded '{submission.student_label}': {grade.total_awarded:g}/{grade.total_possible:g} "
+                f"({grade.fraction:.0%}). Persisted grade {grade.id} for submission {submission.id}."
+            )
+            st.rerun()
 
     last = st.session_state.get("last_grade")
     if last is not None:
