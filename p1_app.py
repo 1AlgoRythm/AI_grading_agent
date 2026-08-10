@@ -32,6 +32,17 @@ from lanes.p1_storage import P1Store
 from lanes.p2_storage import P2Store
 
 
+def _write_uploaded_file(uploaded) -> str:
+    """Write an uploaded file to a temp path, preserving its original name
+    (mkdtemp + real filename) instead of NamedTemporaryFile's random name --
+    otherwise ingest_assignment/ingest_submission derive the label/student
+    handle from a meaningless "tmpXXXXXXXX" stem."""
+    tmp_dir = Path(tempfile.mkdtemp())
+    dest = tmp_dir / (uploaded.name or "upload.txt")
+    dest.write_bytes(uploaded.getvalue())
+    return str(dest)
+
+
 def _get_store() -> P1Store:
     if "p1_store" not in st.session_state:
         st.session_state.p1_store = P1Store(os.getenv("DATABASE_URL", "sqlite:///grading_demo.db"))
@@ -68,10 +79,7 @@ def _render_upload(store: P1Store) -> None:
 
     if st.button("Ingest assignment", disabled=not (uploaded or pasted.strip())):
         if uploaded is not None:
-            suffix = Path(uploaded.name).suffix or ".txt"
-            with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp_file:
-                tmp_file.write(uploaded.getvalue())
-                source = tmp_file.name
+            source = _write_uploaded_file(uploaded)
         else:
             source = pasted
         assignment = p1.ingest_assignment(source)
@@ -205,10 +213,7 @@ def _render_submission_and_grading(p2_store: P2Store) -> None:
 
     if st.button("Ingest & grade submission", disabled=not (uploaded or pasted.strip())):
         if uploaded is not None:
-            suffix = Path(uploaded.name).suffix or ".txt"
-            with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp_file:
-                tmp_file.write(uploaded.getvalue())
-                source = tmp_file.name
+            source = _write_uploaded_file(uploaded)
         else:
             source = pasted
         submission = p1.ingest_submission(source, assignment=assignment)
