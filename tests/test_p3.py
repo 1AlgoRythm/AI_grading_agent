@@ -49,6 +49,21 @@ def test_override_requires_reason_and_finalization_rejects_escalation():
         finalize(grade, "instructor_1")
 
 
+def test_overriding_an_escalated_grade_resolves_it_and_finalize_then_succeeds():
+    # Previously grade.escalated was set by the grader/critic reconciliation
+    # but nothing ever cleared it -- an escalated grade was a permanent dead
+    # end, since finalize() always refuses one. An override is the human
+    # resolution the escalation was asking for, so it should clear the flag.
+    grade = f.sample_grade()
+    grade.escalated = True
+
+    override_problem_score(grade, f.Q2, 3.5, "instructor_1", "Resolved on manual review", InMemoryAuditLog())
+
+    assert grade.escalated is False
+    finalize(grade, "instructor_1")
+    assert grade.status is ArtifactStatus.APPROVED
+
+
 def test_override_can_move_partial_credit_to_full_credit():
     grade, audit = f.sample_grade(), InMemoryAuditLog()
     override_problem_score(

@@ -177,7 +177,7 @@ def render() -> None:
         st.metric("Total", f"{grade.total_awarded:g}/{grade.total_possible:g}")
         st.write(f"Status: **{grade.status.value}** · Resolution: **{grade.resolution.value}**")
         if grade.escalated:
-            st.warning("This grade is escalated and must be resolved before approval.")
+            st.warning("Escalated — override a score to resolve it, then approve.")
         for index in range(len(grade.problem_grades)):
             _render_problem_review(index)
 
