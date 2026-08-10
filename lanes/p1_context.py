@@ -10,7 +10,8 @@ Exports:
 """
 from __future__ import annotations
 
-from typing import List
+from typing import List, Optional
+from uuid import UUID
 
 from contracts import (
     ArtifactStatus,
@@ -32,6 +33,7 @@ def build_context(
     submission: Submission,
     rubric,
     token_budget: int = DEFAULT_TOKEN_BUDGET,
+    problem_type: Optional[str] = None,
 ) -> GradingContext:
     # Human-in-the-loop gate (a hard rule per the project plan, not just a
     # convention): grading context may never be assembled from a solution or
@@ -78,6 +80,7 @@ def build_context(
         student_work=trimmed_work,
         student_final_answer=final,
         points_possible=problem.points_possible,
+        problem_type=problem_type,
         token_budget=token_budget,
         estimated_tokens=est,
     )
@@ -88,10 +91,15 @@ def build_submission_context(
     submission: Submission,
     rubric,
     token_budget: int = DEFAULT_TOKEN_BUDGET,
+    problem_types: Optional[dict[UUID, str]] = None,
 ) -> SubmissionContext:
     problems = {p.id: p for p in assignment.problems}
+    problem_types = problem_types or {}
     contexts: List[GradingContext] = [
-        build_context(problems[a.problem_id], submission, rubric, token_budget=token_budget)
+        build_context(
+            problems[a.problem_id], submission, rubric, token_budget=token_budget,
+            problem_type=problem_types.get(a.problem_id),
+        )
         for a in submission.answers
     ]
     return SubmissionContext(submission_id=submission.id, problem_contexts=contexts)

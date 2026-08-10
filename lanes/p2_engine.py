@@ -74,7 +74,12 @@ def _grade_one_problem(
             critic_agreement=None,
         ), 0
 
-    matched = verify_verdict(final, ctx.reference_answer or "", ctx.problem_statement, assignment_type)
+    # A context that carries its own detected type (fix #7's per-problem
+    # classifier) always wins over the submission-wide default -- that's
+    # what makes a mixed assignment route each problem to its own verifier
+    # instead of one type picked for the whole submission.
+    effective_type = ctx.problem_type or assignment_type
+    matched = verify_verdict(final, ctx.reference_answer or "", ctx.problem_statement, effective_type)
     steps.append(Step(type=StepKind.ACT, data={
         "tool": "verify",
         "problem": tag,

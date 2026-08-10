@@ -278,6 +278,13 @@ class GradingContext(BaseModel):
     student_final_answer: Optional[str]
     points_possible: float = Field(ge=0)
 
+    # Per-problem assignment type (math / short_answer / proof / ...), so a
+    # mixed assignment routes each problem to its own verifier tool
+    # (lanes/p2_tools.py) instead of one type picked for the whole
+    # submission. None means "not classified" -- callers fall back to a
+    # submission-wide default, preserving every caller that predates this.
+    problem_type: Optional[str] = None
+
     token_budget: int = DEFAULT_TOKEN_BUDGET
     estimated_tokens: int            # P1 fills this in and guarantees the bound
 

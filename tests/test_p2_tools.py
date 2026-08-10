@@ -10,6 +10,7 @@ import warnings
 
 import pytest
 
+import fixtures as f
 from contracts import ArtifactStatus, Assignment, Problem, Rubric, RubricCriterion, Submission, SubmissionAnswer
 from lanes import p1_context
 from lanes import p2_grading as p2
@@ -104,6 +105,47 @@ def test_a_proof_is_never_recorded_as_objectively_wrong():
     assert problem_grade.answer_matched is None, "unverifiable must be None, never False"
     assert problem_grade.critic_agreement is not None, "the critic must run when there is no tool verdict"
     assert any(step.data.get("verdict") == "not_applicable" for step in trace.steps)
+
+
+def test_a_mixed_assignment_routes_each_problem_to_its_own_verifier():
+    # Before GradingContext.problem_type existed, grade() took exactly one
+    # assignment_type for the whole call -- a mixed assignment (one math
+    # problem, one proof problem) had no way to give each problem its own
+    # verifier in a single grading pass. This is the actual capability fix
+    # #7's classifier exists to feed: each GradingContext carries its own
+    # detected type, which wins over whatever submission-wide default
+    # grade() would otherwise apply to every problem uniformly.
+    math_problem_id = f.Q1
+    proof_problem_id = f.Q2
+    assignment = f.sample_assignment()
+    rubric = f.sample_rubric()
+    submission = f.sample_submission()
+    # Q2's answer becomes a (correct) proof instead of an algebra answer --
+    # only the *context*'s declared type controls verifier routing, not the
+    # shape of the text itself.
+    submission.answers[1].work_text = PROOF
+    submission.answers[1].final_answer = PROOF
+
+    context = f.sample_submission_context()
+    for i, ctx in enumerate(context.problem_contexts):
+        if ctx.problem_id == math_problem_id:
+            context.problem_contexts[i] = ctx.model_copy(update={"problem_type": "math"})
+        elif ctx.problem_id == proof_problem_id:
+            context.problem_contexts[i] = ctx.model_copy(update={
+                "problem_type": "proof",
+                "reference_answer": PROOF,
+                "student_final_answer": PROOF,
+            })
+
+    # No assignment_type passed -- if per-problem routing didn't work, both
+    # problems would fall back to the same single default ("math"), and the
+    # proof would get run through MathVerifier's symbolic equivalence check.
+    grade, trace = p2.grade(submission, rubric, context)
+
+    math_grade = next(pg for pg in grade.problem_grades if pg.problem_id == math_problem_id)
+    proof_grade = next(pg for pg in grade.problem_grades if pg.problem_id == proof_problem_id)
+    assert math_grade.answer_matched is True  # MathVerifier: objectively confirmed
+    assert proof_grade.answer_matched is None  # ProseVerifier: no objective check, never False
 
 
 def test_an_unjudged_placeholder_score_escalates_rather_than_silently_standing():
