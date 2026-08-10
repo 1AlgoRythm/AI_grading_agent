@@ -192,7 +192,7 @@ def _template_submission() -> Submission:
     return fixtures.sample_submission().model_copy(deep=True)
 
 
-def _build_parsed_assignment(source: str, text: str) -> Assignment | None:
+def _build_parsed_assignment(source: str, text: str, assignment_type: str = "math") -> Assignment | None:
     blocks = _split_problem_blocks(text)
     if not blocks:
         return None
@@ -211,7 +211,7 @@ def _build_parsed_assignment(source: str, text: str) -> Assignment | None:
 
     label = Path(source).stem if _source_path(source) else "assignment"
     title = _sanitize_text(text.splitlines()[0]) if text.splitlines() else label.replace("_", " ").title()
-    assignment = Assignment(label=label, title=title, type="math")
+    assignment = Assignment(label=label, title=title, type=assignment_type)
     for index, block in enumerate(blocks, start=1):
         problem = Problem(
             assignment_id=assignment.id,
@@ -263,16 +263,19 @@ def _build_parsed_submission(source: str, text: str, assignment: Optional[Assign
     )
 
 
-def ingest_assignment(source: str) -> Assignment:
+def ingest_assignment(source: str, assignment_type: str = "math") -> Assignment:
     """Parse an assignment source into a structured `Assignment`.
 
     The function prefers actual source text when it can read it; otherwise it
     falls back to the shared fixture assignment so the walking skeleton stays
-    runnable.
+    runnable. `assignment_type` selects the verification tool P2 uses at
+    grading time (plan §4) -- "math" gets the SymPy-backed objective check;
+    other registered types (e.g. "short_answer", "proof") have none, so
+    grading leans on the critic and human review instead.
     """
     text = _read_source_text(source)
     if text:
-        parsed = _build_parsed_assignment(source, text)
+        parsed = _build_parsed_assignment(source, text, assignment_type)
         if parsed is not None:
             return parsed
     return _strip_fixture_solutions(fixtures.sample_assignment())
