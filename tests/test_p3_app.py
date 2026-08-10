@@ -8,12 +8,19 @@ same way a human clicking through it would.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from contracts import ArtifactStatus
 from lanes import p1_ingestion as p1
 from lanes import p2_grading as p2
 from lanes.p1_storage import P1Store
 from lanes.p2_storage import P2Store
+
+# AppTest.from_file's relative-path resolution has changed across Streamlit
+# versions (resolved against cwd in some, against the calling file's
+# directory in others) -- use an absolute path so this doesn't depend on
+# which Streamlit version pip happens to resolve.
+P3_APP_PATH = str(Path(__file__).resolve().parent.parent / "p3_app.py")
 
 
 def _seed_real_data(db_url: str, *, wrong_answer: bool):
@@ -44,7 +51,7 @@ def test_p3_app_defaults_to_fixtures_with_no_real_data(tmp_path, monkeypatch):
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'empty.db'}")
     from streamlit.testing.v1 import AppTest
 
-    at = AppTest.from_file("p3_app.py")
+    at = AppTest.from_file(P3_APP_PATH)
     at.run()
 
     assert "7.5/10" in at.metric[0].value  # fixtures.sample_grade()'s known total
@@ -57,7 +64,7 @@ def test_p3_app_loads_a_real_assignment_and_grade_from_the_shared_db(tmp_path, m
 
     from streamlit.testing.v1 import AppTest
 
-    at = AppTest.from_file("p3_app.py")
+    at = AppTest.from_file(P3_APP_PATH)
     at.run()
     at.sidebar.selectbox[0].select(f"{assignment.label} ({len(assignment.problems)} problems)").run()
     at.sidebar.selectbox[1].select(at.sidebar.selectbox[1].options[0]).run()
@@ -75,7 +82,7 @@ def test_p3_app_override_and_finalize_both_repersist_to_p2store(tmp_path, monkey
 
     from streamlit.testing.v1 import AppTest
 
-    at = AppTest.from_file("p3_app.py")
+    at = AppTest.from_file(P3_APP_PATH)
     at.run()
     at.sidebar.selectbox[0].select(f"{assignment.label} ({len(assignment.problems)} problems)").run()
     at.sidebar.selectbox[1].select(at.sidebar.selectbox[1].options[0]).run()
@@ -103,7 +110,7 @@ def test_p3_app_load_demo_fixtures_button_resets_to_fixtures(tmp_path, monkeypat
 
     from streamlit.testing.v1 import AppTest
 
-    at = AppTest.from_file("p3_app.py")
+    at = AppTest.from_file(P3_APP_PATH)
     at.run()
     at.sidebar.selectbox[0].select(f"{assignment.label} ({len(assignment.problems)} problems)").run()
     at.sidebar.selectbox[1].select(at.sidebar.selectbox[1].options[0]).run()
@@ -137,7 +144,7 @@ def test_p3_app_shows_a_batch_evaluation_across_an_assignments_graded_submission
 
     from streamlit.testing.v1 import AppTest
 
-    at = AppTest.from_file("p3_app.py")
+    at = AppTest.from_file(P3_APP_PATH)
     at.run()
     at.sidebar.selectbox[0].select(f"{assignment.label} ({len(assignment.problems)} problems)").run()
     at.sidebar.selectbox[1].select(at.sidebar.selectbox[1].options[0]).run()
