@@ -20,6 +20,7 @@ from lanes import p1_rag
 from lanes import p2_grading as p2
 from lanes import p3_feedback as p3
 from lanes.p1_storage import P1Store
+from lanes.p3_review import InMemoryAuditLog, override_problem_score
 
 
 def stage(title: str) -> None:
@@ -102,12 +103,33 @@ def main() -> None:
     # 9. HUMAN REVIEW + FINALIZE (P3 + human gate)
     stage("9. Human review & finalize  [P3 + human]")
     print(f"  status before: {grade.status.value}")
+    if grade.escalated:
+        # Expected, designed behavior (§5): the critic and grader can
+        # genuinely disagree even after the one allowed revision, and
+        # finalize() correctly refuses to auto-approve that -- it needs an
+        # actual human decision first. This script simulates that decision
+        # (a human reviewing the trace and confirming the AI's proposed
+        # score) via the same override path the UIs use, so the walking
+        # skeleton demonstrates the full nine-stage path end to end instead
+        # of stopping short whenever the critic disagrees.
+        print("  grade ESCALATED: critic and grader did not reconcile after the bounded revision round.")
+        audit = InMemoryAuditLog()
+        for pg in grade.problem_grades:
+            if pg.critic_agreement is False:
+                print(f"  [human] reviewing problem {pg.problem_id.hex[-2:]}: "
+                      f"confirming the proposed score {pg.points_awarded:g}/{pg.points_possible:g}")
+                override_problem_score(
+                    grade, pg.problem_id, pg.points_awarded, "instructor_1",
+                    "Auto-resolved in skeleton demo: reviewed the trace and confirmed the proposed score.",
+                    audit,
+                )
+        print(f"  [human] escalation resolved (escalated={grade.escalated})")
     p3.finalize(grade, approver_id="instructor_1")
     print(f"  status after:  {grade.status.value}  (by {grade.approver_id}, {grade.resolution.value})")
 
     stage("DONE — end-to-end path executed")
     print("  Every seam crossed: ingest -> solution -> rubric -> context -> "
-          "grade -> feedback -> approve.")
+          "grade -> feedback -> approve (resolving any escalation along the way).")
     print("  Replace stub bodies with real logic; this path stays green.")
 
 

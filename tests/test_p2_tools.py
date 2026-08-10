@@ -6,12 +6,14 @@ rate to zero on any non-math assignment type.
 """
 from __future__ import annotations
 
+import warnings
+
 import pytest
 
 from contracts import ArtifactStatus, Assignment, Problem, Rubric, RubricCriterion, Submission, SubmissionAnswer
 from lanes import p1_context
 from lanes import p2_grading as p2
-from lanes.p2_tools import get_verifier, verify_verdict
+from lanes.p2_tools import _VERIFIERS, get_verifier, register_verifier, verify_verdict
 
 PROOF = "Exchanging the first interval of any optimal solution for the earliest-finishing one preserves feasibility and does not reduce the count."
 
@@ -37,6 +39,36 @@ def test_prose_verifier_is_selected_by_type():
     assert get_verifier("short_answer").name == "none_prose"
     assert get_verifier("math").name == "sympy_math"
     assert get_verifier("unregistered").name == "none_prose"
+
+
+def test_unregistered_type_warns_before_falling_back_to_prose():
+    # "proof"/"short_answer" are deliberately mapped to the prose verifier --
+    # that's not what this guards. A type nobody registered anything for is
+    # different: silently substituting used to mean a new assignment type
+    # got graded with no objective check and nobody was told.
+    with pytest.warns(RuntimeWarning, match="No verifier registered"):
+        get_verifier("some_brand_new_type")
+
+
+def test_register_verifier_makes_a_new_type_routable():
+    class DummyVerifier:
+        name = "dummy"
+
+        def verify(self, answer, reference_answer, problem_statement):
+            return True
+
+    dummy = DummyVerifier()
+    try:
+        register_verifier("dummy_type", dummy)
+        assert get_verifier("dummy_type") is dummy
+        assert get_verifier("DUMMY_TYPE") is dummy  # case-insensitive, like assignment types
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            get_verifier("dummy_type")  # registered -- must not warn
+        assert not caught
+    finally:
+        del _VERIFIERS["dummy_type"]
 
 
 def _proof_setup():

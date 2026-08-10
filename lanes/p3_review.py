@@ -66,8 +66,23 @@ def override_problem_score(
         raise ValueError("override score must be within the problem point range")
 
     previous = problem_grade.points_awarded
-    # Each assignment is validated, so establish a temporary justification
-    # before changing a non-graded/partial entry into a graded one.
+    # The human's decision has two homes: `partial_credit_reason` (below) and
+    # the audit log entry (recording approver, previous/new points, reason).
+    # `evidence` is the AI's original grading evidence and is deliberately
+    # never touched here -- writing the override reason into it too was a
+    # second copy of the same information with no clear owner, and repeated
+    # overrides piled "Human override: ..." onto it forever, which leaked
+    # straight into the feedback panel and the student chat (both read
+    # `evidence` verbatim). The audit log is the single source of truth for
+    # "who changed what, and why."
+    #
+    # ProblemGrade validates on every individual attribute assignment
+    # (validate_assignment=True), so this order matters: a NO_ANSWER/
+    # UNGRADEABLE entry has points_awarded=0 and no partial_credit_reason,
+    # and flipping `outcome` to GRADED first, before points_awarded catches
+    # up, would transiently look like unjustified partial credit and fail
+    # validation right there. Set a placeholder reason before that flip so
+    # the intermediate state is always valid.
     if problem_grade.points_awarded < problem_grade.points_possible:
         problem_grade.partial_credit_reason = reason
     problem_grade.outcome = ProblemOutcome.GRADED
@@ -77,7 +92,6 @@ def override_problem_score(
     else:
         problem_grade.points_awarded = adjusted
         problem_grade.partial_credit_reason = None
-    problem_grade.evidence = f"{problem_grade.evidence} Human override: {reason}".strip()
     grade.resolution = GradeResolution.HUMAN_OVERRIDDEN
     grade.approver_id = approver_id
     # finalize() refuses an escalated grade -- and nothing ever cleared the

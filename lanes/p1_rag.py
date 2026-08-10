@@ -27,6 +27,22 @@ def _tokenize(text: str) -> set[str]:
     return set(re.findall(r"\w+", text.lower()))
 
 
+_STOPWORDS = {
+    "a", "an", "the", "and", "or", "but", "for", "of", "in", "on", "to", "is", "are",
+    "was", "were", "be", "been", "being", "with", "at", "by", "from", "this", "that",
+    "it", "as", "use", "using",
+}
+
+
+def _significant_words(text: str) -> set[str]:
+    """Tokens worth using as a relevance signal, i.e. `_tokenize` minus common
+    stopwords and generic verbs ("use", "for", ...). Without this, two
+    completely unrelated passages can look related just because they both
+    happen to contain "for" or "the" -- exactly the false-positive that let
+    an irrelevant textbook chunk pass the relevance gate below."""
+    return _tokenize(text) - _STOPWORDS
+
+
 def _chunk_text(text: str, chunk_size: int = 900, overlap: int = 120) -> list[str]:
     text = text.strip()
     if not text:
@@ -157,7 +173,7 @@ def retrieve_method_from_textbook(problem_statement: str) -> Optional[str]:
     """Return a short method snippet from the best matching textbook file."""
     if not problem_statement:
         return None
-    stmt_words = _tokenize(problem_statement)
+    stmt_words = _significant_words(problem_statement)
     best_score = 0
     best_snippet: str | None = None
 
@@ -168,21 +184,36 @@ def retrieve_method_from_textbook(problem_statement: str) -> Optional[str]:
             result = collection.query(query_embeddings=[query_embedding], n_results=3)
             documents = result.get("documents", [[]])[0]
             metadatas = result.get("metadatas", [[]])[0] or [{}] * len(documents)
-            if documents:
+            # Chroma always returns up to n_results nearest neighbors, even
+            # when none of them are actually relevant -- the hash-based
+            # embedding is a coarse bag-of-words signal, so for a small
+            # corpus "nearest available" is not the same as "relevant," and
+            # an unrelated chunk got dragged along just to fill the quota
+            # (it flowed straight into solutions/rubrics/feedback text).
+            # Gate each candidate on real lexical overlap with the query
+            # before including it.
+            relevant = [
+                (doc, meta) for doc, meta in zip(documents, metadatas)
+                if _significant_words(doc) & stmt_words
+            ]
+            if relevant:
                 # Source-labeled so it's visible which chunk(s) grounded the
                 # rubric, not just an unattributed blob of retrieved text.
                 parts = []
-                for doc, meta in zip(documents, metadatas):
+                for doc, meta in relevant:
                     source_name = Path(str(meta.get("path", "textbook"))).name
                     parts.append(f"[{source_name}]\n{doc.strip()}")
                 return "\n\n".join(parts)
+            # No candidate was actually relevant -- fall through to the
+            # deterministic scorer below rather than returning nothing; it
+            # scores against full file content, not just this chunk set.
         except Exception:
             # Fall back to the deterministic scorer below.
             pass
 
     for path, content in sources:
         content_lower = content.lower()
-        content_words = _tokenize(content_lower)
+        content_words = _significant_words(content_lower)
         overlap = stmt_words & content_words
         score = len(overlap)
         if not score:

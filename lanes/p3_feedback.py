@@ -8,6 +8,7 @@ from uuid import UUID
 
 from contracts import Grade, ProblemGrade, ProblemOutcome, Rubric
 from lanes.p3_review import finalize
+from model_provider import call_model
 
 __all__ = [
     "answer_followup",
@@ -89,7 +90,16 @@ def clear_feedback_contexts() -> None:
 
 
 def answer_followup(question: str, submission_id: UUID) -> str:
-    """Answer only from registered grade/rubric context."""
+    """Answer a student's follow-up question, grounded in the recorded grade.
+
+    The grounding block is generate_feedback's own per-problem output --
+    the same evidence, rubric criteria, and score already shown on the grade
+    panel -- fed to the model with an explicit instruction to answer from it
+    alone and say so plainly when a question isn't covered by it, rather
+    than freelancing an answer the recorded grade doesn't actually support.
+    Fails closed: with no registered context, this returns the "not
+    available yet" message without ever calling the model.
+    """
     question = _clean(question)
     if not question:
         raise ValueError("question must not be blank")
@@ -101,15 +111,18 @@ def answer_followup(question: str, submission_id: UUID) -> str:
         )
 
     feedback = generate_feedback(context.grade, context.rubric)
-    lowered = question.lower()
-    selected = [
-        (problem_id, text)
-        for problem_id, text in feedback.items()
-        if str(problem_id).lower() in lowered or problem_id.hex[-2:] in lowered
-    ]
-    if not selected:
-        selected = list(feedback.items())
-    explanations = " ".join(
-        f"Problem {problem_id.hex[-2:]} — {text}" for problem_id, text in selected
+    grounding = "\n".join(
+        f"Problem {problem_id.hex[-2:]}: {text}" for problem_id, text in feedback.items()
     )
-    return f"Based on the approved rubric and recorded grading evidence: {explanations}"
+    prompt = (
+        "You are answering a student's question about their graded assignment. "
+        "Answer using ONLY the recorded grading evidence below -- do not invent "
+        "reasoning, scores, or rubric criteria that aren't in it. If the question "
+        "asks about something this evidence doesn't cover (for example, how a "
+        "problem *should* have been solved, when only the grade on what they "
+        "actually submitted is recorded), say plainly that it isn't covered in "
+        "the recorded grade instead of guessing.\n\n"
+        f"Recorded grading evidence:\n{grounding}\n\n"
+        f"Student question: {question}"
+    )
+    return call_model(prompt, max_tokens=400).strip()

@@ -16,11 +16,19 @@ poisons the answer-match-rate metric P3 reports.
 from __future__ import annotations
 
 import re
+import warnings
 from typing import Optional, Protocol
 
 from lanes.p2_verify import check_equivalence
 
-__all__ = ["VerificationTool", "MathVerifier", "ProseVerifier", "get_verifier", "verify_verdict"]
+__all__ = [
+    "VerificationTool",
+    "MathVerifier",
+    "ProseVerifier",
+    "get_verifier",
+    "register_verifier",
+    "verify_verdict",
+]
 
 
 def _looks_symbolic(text: str) -> bool:
@@ -86,8 +94,32 @@ _VERIFIERS: dict[str, VerificationTool] = {
 }
 
 
+def register_verifier(type_name: str, verifier: VerificationTool) -> None:
+    """Register a verification tool for an assignment type -- e.g. a test
+    runner for "code" or a real semantic comparator for "short_answer."
+    Mirrors `contracts.register_assignment_type`: adding a type should never
+    require editing this lane, just registering a tool for it."""
+    _VERIFIERS[type_name.strip().lower()] = verifier
+
+
 def get_verifier(assignment_type: str) -> VerificationTool:
-    return _VERIFIERS.get((assignment_type or "math").strip().lower(), ProseVerifier())
+    key = (assignment_type or "math").strip().lower()
+    verifier = _VERIFIERS.get(key)
+    if verifier is None:
+        # "proof"/"short_answer" are *deliberately* registered to the prose
+        # verifier above -- that's a real decision, not a gap. Landing here
+        # means the type isn't registered at all, so the fallback needs to
+        # be loud: silently substituting used to mean a new assignment type
+        # got graded with no objective check and nobody was told.
+        warnings.warn(
+            f"No verifier registered for assignment type {key!r}; falling back to the "
+            "prose verifier (no objective check available). Call register_verifier() "
+            "to give this type a real check.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return ProseVerifier()
+    return verifier
 
 
 def verify_verdict(

@@ -25,6 +25,7 @@ from contracts import (
 )
 from lanes import p1_context, p1_io, p1_rag, p1_solution
 from lanes.p1_io import _sanitize_text
+from lanes.p2_tools import get_verifier
 
 
 def test_ingest_assignment_parses_plain_text(tmp_path, monkeypatch):
@@ -172,12 +173,21 @@ def test_retrieve_method_returns_multiple_sources_with_labels(tmp_path, monkeypa
         "with the earliest-finishing interval; feasibility and optimality are preserved.",
         encoding="utf8",
     )
+    (textbook / "greedy_proof.txt").write_text(
+        "The exchange argument shows optimality is preserved because swapping in the "
+        "earliest-finishing interval never reduces the count of non-overlapping intervals.",
+        encoding="utf8",
+    )
 
     snippet = p1_rag.retrieve_method_from_textbook("Prove the greedy exchange argument preserves optimality")
 
     assert snippet is not None
     assert "[greedy.txt]" in snippet
-    assert "[algebra.txt]" in snippet  # top-3 -- both small files should appear
+    assert "[greedy_proof.txt]" in snippet  # both genuinely relevant -- multi-source grounding still works
+    # algebra.txt shares no real vocabulary with this query -- Chroma's raw
+    # top-3 used to drag it in anyway just to fill the quota; the lexical
+    # relevance gate must filter it back out.
+    assert "[algebra.txt]" not in snippet
 
 
 def test_textbook_index_is_cached_across_calls(tmp_path, monkeypatch):
@@ -270,6 +280,41 @@ def _fake_call_model_json(response: dict):
         _fake.last_prompt = prompt
         return response
     return _fake
+
+
+def test_classify_problem_type_routes_math_to_the_math_verifier(monkeypatch):
+    monkeypatch.setattr(p1_solution, "call_model_json", _fake_call_model_json({"type": "math", "confident": True}))
+    result = p1_solution.classify_problem_type("Solve for x: 2x + 6 = 10.")
+    assert result.type == "math"
+    assert result.confident is True
+    assert get_verifier(result.type).name == "sympy_math"
+
+
+def test_classify_problem_type_routes_proof_to_the_prose_verifier(monkeypatch):
+    monkeypatch.setattr(
+        p1_solution, "call_model_json",
+        _fake_call_model_json({"type": "proof", "confident": True}),
+    )
+    result = p1_solution.classify_problem_type("Prove that if x^2 is even, then x is even.")
+    assert result.type == "proof"
+    assert get_verifier(result.type).name == "none_prose"
+
+
+def test_classify_problem_type_falls_back_to_unconfident_prose_when_unparseable():
+    # No call_model_json mocked -> the offline stub's generic {"version":...}
+    # shape, which has no "type" key.
+    result = p1_solution.classify_problem_type("Some problem statement.")
+    assert result.type == "short_answer"
+    assert result.confident is False
+    assert get_verifier(result.type).name == "none_prose"  # safe default: no false objective check
+
+
+def test_classify_problem_type_treats_a_new_type_as_a_type_name_not_a_crash(monkeypatch):
+    # The model can propose a type outside contracts.py's known set (e.g.
+    # "code") -- that's expected, not an error; routing it is fix #6's job.
+    monkeypatch.setattr(p1_solution, "call_model_json", _fake_call_model_json({"type": "code", "confident": True}))
+    result = p1_solution.classify_problem_type("Write a function that reverses a linked list.")
+    assert result.type == "code"
 
 
 def test_develop_solution_ignores_the_fixture_shortcut_when_a_real_model_is_configured(monkeypatch):

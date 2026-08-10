@@ -8,14 +8,50 @@ from __future__ import annotations
 
 import os
 import re
+from dataclasses import dataclass
 from typing import Optional
 
 import fixtures
-from contracts import ArtifactStatus, Problem, Assignment, Rubric, SolutionSource, new_id
+from contracts import ArtifactStatus, Problem, Assignment, Rubric, SolutionSource, known_assignment_types, new_id
 from model_provider import call_model_json
 from lanes.p2_verify import check_equivalence
 
-__all__ = ["develop_solution", "draft_rubric", "verify_solution"]
+__all__ = ["classify_problem_type", "develop_solution", "draft_rubric", "verify_solution", "ProblemTypeClassification"]
+
+
+@dataclass(frozen=True)
+class ProblemTypeClassification:
+    type: str
+    confident: bool
+
+
+def classify_problem_type(problem_statement: str) -> ProblemTypeClassification:
+    """Ask the model what assignment type a single problem is (math,
+    short_answer, proof, ...) so the right verifier (lanes/p2_tools.py)
+    routes automatically per problem -- one dropdown can't pick a single
+    type for a mixed assignment, and per-problem classification is what
+    actually reflects that.
+
+    On low confidence or an unparseable response, falls back to a
+    not-confident "short_answer" classification -- routing to the
+    judgment-only verifier, never a false objective check. A wrong
+    "no objective check" is still a subjective grade that gets a critic and
+    a human gate; a wrong objective check is a confidently incorrect verdict
+    handed to the grader as settled fact.
+    """
+    known = ", ".join(sorted(known_assignment_types()))
+    prompt = (
+        f"Classify this problem's assignment type. Known types: {known}. "
+        "If none of those fit, propose a short lowercase type name (e.g. \"code\").\n\n"
+        f"Problem: {problem_statement}\n\n"
+        "Respond with ONLY a JSON object: {\"type\": <string>, \"confident\": <true|false>}."
+    )
+    raw = call_model_json(prompt, max_tokens=64)
+    if isinstance(raw, dict) and raw.get("type"):
+        type_name = str(raw["type"]).strip().lower()
+        if type_name:
+            return ProblemTypeClassification(type=type_name, confident=bool(raw.get("confident", True)))
+    return ProblemTypeClassification(type="short_answer", confident=False)
 
 
 def _generate_solution_text(problem: Problem, method_context: Optional[str]) -> tuple[str, Optional[str]]:
