@@ -9,3 +9,5 @@ venv/
 .p1_textbook_index/
 Agent_Plan.md
 AI_Grading_Agent_Project_Plan_2.md
+textbook/clrs_*.md
+textbook/*.pdf
