@@ -12,12 +12,20 @@ the real assignment, which `generate_feedback` silently depended on.
 """
 from __future__ import annotations
 
+from pathlib import Path
+
+# AppTest.from_file's relative-path resolution has changed across Streamlit
+# versions (resolved against cwd in some, against the calling file's
+# directory in others) -- use an absolute path so this doesn't depend on
+# which Streamlit version pip happens to resolve.
+APP_PATH = str(Path(__file__).resolve().parent.parent / "app.py")
+
 
 def test_grading_on_the_upload_tab_is_immediately_visible_on_the_other_tabs(tmp_path, monkeypatch):
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'app.db'}")
     from streamlit.testing.v1 import AppTest
 
-    at = AppTest.from_file("app.py")
+    at = AppTest.from_file(APP_PATH)
     at.run()
     assert at.sidebar.radio[0].value == "Upload & Rubric"
 
