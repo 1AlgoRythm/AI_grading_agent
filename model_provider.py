@@ -47,21 +47,37 @@ def call_model(
     provider = os.getenv("MODEL_PROVIDER")
     key = os.getenv("MODEL_API_KEY")
     name = model or os.getenv("MODEL_NAME")
-    # Minimal OpenAI path if requested (non-blocking if package absent).
     if provider == "openai" and key:
         try:
-            import openai
+            # Modern (>=1.0) OpenAI SDK client -- the old `openai.ChatCompletion.create` /
+            # `openai.api_key = ...` module-level API was removed in openai 1.0 and would
+            # otherwise fail here silently (caught below) with no indication why.
+            from openai import OpenAI
 
-            openai.api_key = key
-            resp = openai.ChatCompletion.create(
+            client = OpenAI(api_key=key)
+            resp = client.chat.completions.create(
                 model=name or "gpt-4o-mini",
                 messages=[{"role": "user", "content": prompt}],
                 max_tokens=max_tokens or 512,
                 temperature=temperature,
             )
-            return resp.choices[0].message.content
+            return resp.choices[0].message.content or ""
         except Exception:
             # Fall through to stub on any failure.
+            pass
+    elif provider == "anthropic" and key:
+        try:
+            import anthropic
+
+            client = anthropic.Anthropic(api_key=key)
+            resp = client.messages.create(
+                model=name or "claude-sonnet-5",
+                max_tokens=max_tokens or 512,
+                temperature=temperature,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            return "".join(block.text for block in resp.content if getattr(block, "type", None) == "text")
+        except Exception:
             pass
     # Deterministic fallback for offline/test runs
     return _stub_response(prompt, max_tokens)

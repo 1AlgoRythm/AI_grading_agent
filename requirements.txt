@@ -13,7 +13,11 @@ pypdf>=4.0         # P1 — text-PDF assignment/submission ingestion
 sympy>=1.12        # P1 (solution substitution check) & P2 (equivalence tool)
 chromadb>=0.5      # P1 — vector-store-backed textbook index
 
+# BYOK model providers -- install whichever you actually have a key for
+# (both are lightweight HTTP clients, safe to keep both installed).
+openai>=1.0
+anthropic>=0.34
+
 # Added per lane as real implementations land (uncomment when needed):
 # fastapi           # P3 — API
 # uvicorn           # P3 — server
-# anthropic         # BYOK provider (or openai / google-generativeai)
