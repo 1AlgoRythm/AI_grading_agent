@@ -128,7 +128,18 @@ def _render_solution_review(store: P1Store) -> None:
             )
 
             ok, note = p1.verify_solution(problem)
-            (st.success if ok else st.warning)(f"verify_solution: {note}")
+            # ok is three-state: True/False when the check actually ran and
+            # reached a verdict, None when it could not run at all (no
+            # model configured, a prose reference, nothing re-derivable).
+            # Treating None the same as False here would show a scary
+            # warning for "nothing was checked," indistinguishable from an
+            # actual disagreement.
+            if ok is True:
+                st.success(f"verify_solution: {note}")
+            elif ok is False:
+                st.warning(f"verify_solution: {note}")
+            else:
+                st.info(f"verify_solution: {note}")
 
             col1, col2 = st.columns(2)
             with col1:

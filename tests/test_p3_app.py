@@ -73,7 +73,10 @@ def test_p3_app_loads_a_real_assignment_and_grade_from_the_shared_db(tmp_path, m
     assert f"{grade.total_awarded:g}/{grade.total_possible:g}" in at.metric[0].value
 
 
-def test_p3_app_override_and_finalize_both_repersist_to_p2store(tmp_path, monkeypatch):
+def test_p3_app_has_no_override_controls_and_finalize_repersists_to_p2store(tmp_path, monkeypatch):
+    # Overriding a score is a p2_app.py ("grade and trace") action now --
+    # this screen is read-only review + feedback + final approval, so it
+    # must not expose an override form at all.
     db_url = f"sqlite:///{tmp_path / 'p3.db'}"
     monkeypatch.setenv("DATABASE_URL", db_url)
     assignment, grade, _, p2_store = _seed_real_data(db_url, wrong_answer=True)
@@ -88,12 +91,8 @@ def test_p3_app_override_and_finalize_both_repersist_to_p2store(tmp_path, monkey
     at.sidebar.selectbox[1].select(at.sidebar.selectbox[1].options[0]).run()
     at.sidebar.button[0].click().run()
 
-    at.number_input[0].set_value(float(problem_grade.points_possible)).run()
-    at.text_input[1].set_value("Equivalent method accepted on manual review").run()
-    at.button(key=f"FormSubmitter:override-{problem_grade.problem_id}-Save override").click().run()
-
-    after_override = p2_store.get_grade(grade.id)
-    assert after_override.total_awarded == after_override.total_possible
+    assert len(at.number_input) == 0
+    assert not any(b.label == "Save override" for b in at.button)
 
     approve_btn = next(b for b in at.button if b.label == "Approve final grade")
     approve_btn.click().run()
@@ -101,6 +100,9 @@ def test_p3_app_override_and_finalize_both_repersist_to_p2store(tmp_path, monkey
     finalized = p2_store.get_grade(grade.id)
     assert finalized.status is ArtifactStatus.APPROVED
     assert finalized.approver_id == "instructor_1"
+    # Finalize approves whatever score was already recorded -- it doesn't
+    # change it, since this screen can no longer override it.
+    assert finalized.total_awarded == grade.total_awarded
 
 
 def test_p3_app_load_demo_fixtures_button_resets_to_fixtures(tmp_path, monkeypatch):

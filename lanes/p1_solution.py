@@ -14,6 +14,7 @@ from typing import Optional
 import fixtures
 from contracts import ArtifactStatus, Problem, Assignment, Rubric, SolutionSource, known_assignment_types, new_id
 from model_provider import call_model_json
+from lanes.p2_tools import get_verifier
 from lanes.p2_verify import check_equivalence
 
 __all__ = ["classify_problem_type", "develop_solution", "draft_rubric", "verify_solution", "ProblemTypeClassification"]
@@ -46,7 +47,7 @@ def classify_problem_type(problem_statement: str) -> ProblemTypeClassification:
         f"Problem: {problem_statement}\n\n"
         "Respond with ONLY a JSON object: {\"type\": <string>, \"confident\": <true|false>}."
     )
-    raw = call_model_json(prompt, max_tokens=64)
+    raw = call_model_json(prompt, max_tokens=128)
     if isinstance(raw, dict) and raw.get("type"):
         type_name = str(raw["type"]).strip().lower()
         if type_name:
@@ -71,7 +72,8 @@ def _generate_solution_text(problem: Problem, method_context: Optional[str]) -> 
         prompt += f"Ground your method in this course material:\n{method_context}\n"
     prompt += (
         "\nRespond with ONLY a JSON object: {\"solution\": <string with the worked "
-        "solution>, \"final_answer\": <string with just the final answer>}."
+        "solution>, \"final_answer\": <string with ONLY the final answer as a short "
+        "expression -- no working, no steps, repeated here from the solution field>}."
     )
     raw = call_model_json(prompt, max_tokens=512)
     if isinstance(raw, dict) and raw.get("solution"):
@@ -230,34 +232,87 @@ def _model_configured() -> bool:
     return bool(os.getenv("MODEL_PROVIDER") and os.getenv("MODEL_API_KEY"))
 
 
-def _self_consistency_check(problem: Problem) -> Optional[tuple[bool, str]]:
+def _extract_short_answer(text: str) -> Optional[str]:
+    """Best-effort salvage when the model puts its working in the answer
+    field despite being told not to (models don't always obey). Tries, in
+    order: a trailing "<name> = <value>" assignment (e.g. "...divide by 3,
+    y = 7" -> "y = 7" -- keeps the variable name, since the reference answer
+    likely has it too and a bare "7" wouldn't match "y = 7"), then the tail
+    after the last "=", then the last non-blank line. Returns None (don't
+    guess) if no candidate is actually short and symbolic -- a failed
+    salvage should fall through to "skipped," never to a comparison against
+    a stray fragment of a sentence.
+    """
+    candidates = []
+    trailing_assignment = re.search(r"([a-zA-Z]\w*\s*=\s*[^,;.\n]+?)\s*[.,]?\s*$", text)
+    if trailing_assignment:
+        candidates.append(trailing_assignment.group(1).strip())
+    if "=" in text:
+        candidates.append(text.rsplit("=", 1)[-1].strip())
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    if lines:
+        candidates.append(lines[-1])
+    for candidate in candidates:
+        if _looks_symbolic(candidate):
+            return candidate
+    return None
+
+
+def _self_consistency_check(problem: Problem, problem_type: Optional[str] = None) -> Optional[tuple[bool, str]]:
     """Re-derive an answer independently and compare via P2's tool.
 
     Only runs a real re-derivation when a real BYOK provider is configured —
     the generic offline stub isn't grading-aware, so calling it here would
     just fabricate a false "disagreement" on every solution. Returns None
     when the check cannot meaningfully run.
+
+    When `problem_type` is known (from fix #7's classifier), it is the
+    authoritative signal for whether this problem even has a symbolically
+    comparable answer -- checked via the same verifier registry grading
+    uses, so "does this type get an objective check" is answered in exactly
+    one place, not decided twice by two different heuristics that could
+    disagree. Without it (existing callers that predate per-problem
+    classification), falls back to `_looks_symbolic` on the reference answer
+    text alone. That fallback is a real, live gap: a proof's *final answer*
+    field is a short conclusion sentence (e.g. "x^2 is even."), which can
+    slip under `_looks_symbolic`'s word-count guard and get compared as if
+    it were a symbolic expression, producing a nonsense "disagrees" verdict
+    on a correct proof. `problem_type` closes that gap when it's available.
     """
     if not _model_configured():
         return None
+    if problem_type is not None:
+        if get_verifier(problem_type).name != "sympy_math":
+            return None
+    elif not _looks_symbolic(problem.reference_answer or ""):
+        # No known type -- fall back to guessing from the text. The
+        # reference looks like prose (a proof, a written explanation), so
+        # equivalence checking has no opinion here no matter what comes
+        # back, and there's no point spending a call finding that out.
+        return None
+
     prompt = (
-        "Solve this problem independently, showing brief work.\n"
+        "Solve this problem independently.\n"
         f"Problem: {problem.statement}\n\n"
-        "Respond with ONLY a JSON object: {\"final_answer\": <string with just the "
-        "final answer>}."
+        "Respond with ONLY a JSON object: {\"final_answer\": <string>}. The "
+        "final_answer value must be ONLY the final answer as a short "
+        "expression -- no working, no steps, no explanation. For example "
+        "\"y = 7\" or \"x^2 + x - 6\", never a sentence describing how you "
+        "got there."
     )
-    raw = call_model_json(prompt, max_tokens=256)
+    raw = call_model_json(prompt, max_tokens=512)
     rederived = raw.get("final_answer") if isinstance(raw, dict) else None
     rederived = str(rederived).strip() if rederived else None
     if not rederived:
         return None
-    if not _looks_symbolic(problem.reference_answer or "") or not _looks_symbolic(rederived):
-        # check_equivalence is SymPy-backed: it can't parse free-form prose
-        # (a proof, a written explanation), and would silently return False
-        # for two answers that are both correct but worded differently --
-        # reporting that as "disagrees" would be a false, misleading signal,
-        # worse than just admitting this check doesn't apply here.
-        return None
+
+    if not _looks_symbolic(rederived):
+        # Asked for the answer only and got working anyway -- try to salvage
+        # a short expression before giving up on the check entirely.
+        rederived = _extract_short_answer(rederived)
+        if rederived is None:
+            return None
+
     agrees = check_equivalence(problem.reference_answer or "", rederived)
     note = (
         f"Self-consistency re-derivation {'agrees' if agrees else 'disagrees'} with "
@@ -276,11 +331,27 @@ def _looks_symbolic(text: str) -> bool:
     return bool(re.search(r"[0-9=+\-*/^]", stripped))
 
 
-def verify_solution(problem: Problem) -> tuple[bool, str]:
+def verify_solution(problem: Problem, problem_type: Optional[str] = None) -> tuple[Optional[bool], str]:
     """Best-effort validation of a proposed solution (decision: never
     approves -- a human approves) via self-consistency: re-derive the answer
     independently through the LLM and compare it with P2's check_equivalence
     tool.
+
+    `problem_type` (from fix #7's classifier) is optional and additive --
+    when given, it authoritatively decides whether this problem's answer is
+    symbolically comparable at all (via the same verifier registry grading
+    uses), which is more reliable than guessing from the reference answer's
+    text alone. Every existing caller that doesn't know about per-problem
+    types yet keeps the exact same text-heuristic behavior it always had.
+
+    Returns (agrees, note), where `agrees` is three-state, not a plain bool:
+    `True`/`False` when the check actually ran and reached a verdict, `None`
+    when it could not run at all (no model configured, a prose reference, no
+    comparable answer re-derived, or no solution yet). Collapsing "could not
+    run" into `False` would make a skipped check indistinguishable from a
+    genuine disagreement to any caller reading the value as a bool --
+    exactly the ambiguity `lanes/p2_tools.py`'s three-state verdict exists to
+    avoid on the grading side; this is the same principle applied here.
 
     A regex-based substitution check used to run here too (extract the one
     equation from the raw problem statement, plug the answer back in).
@@ -291,15 +362,20 @@ def verify_solution(problem: Problem) -> tuple[bool, str]:
     not a hand-rolled parser standing in for one.
     """
     if not problem.reference_answer or not problem.reference_solution:
-        return False, "No proposed solution to verify yet."
+        return None, "No proposed solution to verify yet."
 
-    consistency = _self_consistency_check(problem)
+    consistency = _self_consistency_check(problem, problem_type)
     if consistency is not None:
         return consistency
 
     if not _model_configured():
         note = "Self-consistency check skipped (no BYOK model provider configured)."
-    elif not _looks_symbolic(problem.reference_answer or ""):
+    elif problem_type is not None and get_verifier(problem_type).name != "sympy_math":
+        note = (
+            f"Self-consistency check skipped: problem type {problem_type!r} has no "
+            "objective check -- rely on human review here."
+        )
+    elif problem_type is None and not _looks_symbolic(problem.reference_answer or ""):
         note = (
             "Self-consistency check skipped: the reference answer is free-form prose "
             "(e.g. a proof or written explanation), not a short symbolic expression "
@@ -307,4 +383,4 @@ def verify_solution(problem: Problem) -> tuple[bool, str]:
         )
     else:
         note = "Self-consistency check skipped: no comparable answer was re-derived."
-    return False, f"{note} No verification could be performed; needs human review."
+    return None, f"{note} No verification could be performed; needs human review."

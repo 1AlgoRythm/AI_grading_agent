@@ -228,7 +228,9 @@ def test_verify_solution_cannot_confirm_correctness_without_a_real_model(monkeyp
         reference_solution="2x + 6 = 10 -> 2x = 4 -> x = 2.",
     )
     ok, note = p1_solution.verify_solution(problem)
-    assert ok is False
+    # None, not False: the check could not run at all, which must not read
+    # the same as "ran and disagreed."
+    assert ok is None
     assert "No verification could be performed" in note
 
 
@@ -273,6 +275,86 @@ def test_verify_solution_flags_disagreement_via_llm_self_consistency(monkeypatch
     ok, note = p1_solution.verify_solution(problem)
     assert ok is False
     assert "disagrees" in note
+
+
+def test_self_consistency_salvages_a_chatty_answer_field(monkeypatch):
+    # The real bug this guards: a model asked for "brief work" alongside the
+    # final answer will happily stuff the whole derivation into the
+    # final_answer field. _looks_symbolic correctly rejects a 12+-word blob
+    # -- the fix isn't loosening that guard (which would let real prose
+    # through and cause false "disagrees"), it's salvaging the trailing
+    # short answer from the chatty response before giving up.
+    monkeypatch.setenv("MODEL_PROVIDER", "openai")
+    monkeypatch.setenv("MODEL_API_KEY", "fake-key-for-test")
+    monkeypatch.setattr(
+        p1_solution, "call_model_json",
+        lambda prompt, max_tokens=512: {
+            "final_answer": "Add 7 to both sides: 3y = 21, divide by 3, y = 7"
+        },
+    )
+    problem = Problem(
+        assignment_id=Assignment(label="hw", title="HW", type="math").id,
+        label="Q1",
+        statement="Solve for y: 3y - 7 = 14.",
+        points_possible=5,
+        reference_answer="y = 7",
+        reference_solution="3y - 7 = 14 -> 3y = 21 -> y = 7.",
+    )
+    ok, note = p1_solution.verify_solution(problem)
+    assert ok is True
+    assert "agrees" in note
+
+
+def test_self_consistency_gives_up_honestly_when_nothing_salvageable(monkeypatch):
+    # A response with no short symbolic tail at all (no "=", no short last
+    # line) must fall through to "skipped," never force a comparison against
+    # a fragment of a sentence.
+    monkeypatch.setenv("MODEL_PROVIDER", "openai")
+    monkeypatch.setenv("MODEL_API_KEY", "fake-key-for-test")
+    monkeypatch.setattr(
+        p1_solution, "call_model_json",
+        lambda prompt, max_tokens=512: {
+            "final_answer": "I attempted to isolate the variable but the reasoning did not fully resolve"
+        },
+    )
+    problem = Problem(
+        assignment_id=Assignment(label="hw", title="HW", type="math").id,
+        label="Q1",
+        statement="Solve for y: 3y - 7 = 14.",
+        points_possible=5,
+        reference_answer="y = 7",
+        reference_solution="3y - 7 = 14 -> 3y = 21 -> y = 7.",
+    )
+    ok, note = p1_solution.verify_solution(problem)
+    assert ok is None
+    assert "No verification could be performed" in note
+
+
+def test_self_consistency_prompt_instructs_answer_only_no_work(monkeypatch):
+    # Fix A: the prompt bug was asking for "brief work" in the same field as
+    # the answer. Assert the actual instruction sent to the model, not just
+    # the downstream behavior, so a regression back to the old wording would
+    # be caught even if a future model happens to comply anyway.
+    monkeypatch.setenv("MODEL_PROVIDER", "openai")
+    monkeypatch.setenv("MODEL_API_KEY", "fake-key-for-test")
+    captured = {}
+
+    def fake(prompt, max_tokens=512):
+        captured["prompt"] = prompt
+        captured["max_tokens"] = max_tokens
+        return {"final_answer": "y = 7"}
+
+    monkeypatch.setattr(p1_solution, "call_model_json", fake)
+    problem = Problem(
+        assignment_id=Assignment(label="hw", title="HW", type="math").id,
+        label="Q1", statement="Solve for y: 3y - 7 = 14.", points_possible=5,
+        reference_answer="y = 7", reference_solution="3y - 7 = 14 -> 3y = 21 -> y = 7.",
+    )
+    p1_solution.verify_solution(problem)
+
+    assert "no working" in captured["prompt"].lower()
+    assert "brief work" not in captured["prompt"].lower()
+    assert captured["max_tokens"] == 512
 
 
 def _fake_call_model_json(response: dict):
@@ -413,7 +495,7 @@ def test_verify_solution_reports_no_proposed_solution_yet():
         points_possible=5,
     )
     ok, note = p1_solution.verify_solution(problem)
-    assert ok is False
+    assert ok is None  # nothing was checked, not "checked and disagreed"
     assert "No proposed solution" in note
 
 
@@ -429,7 +511,7 @@ def test_verify_solution_skips_gracefully_when_it_cannot_parse_the_problem(monke
         reference_solution="(x+1)^2 = (x+1)(x+1) = x^2 + 2x + 1.",
     )
     ok, note = p1_solution.verify_solution(problem)
-    assert ok is False
+    assert ok is None  # the check couldn't run, not "ran and disagreed"
     assert "No verification could be performed" in note
 
 
@@ -456,6 +538,38 @@ def test_self_consistency_skips_instead_of_false_disagreeing_on_a_proof(monkeypa
 
     assert "disagrees" not in note
     assert "free-form prose" in note
+
+
+def test_self_consistency_skips_a_short_proof_conclusion_when_type_is_known(monkeypatch):
+    # The real, live gap this guards: a proof's *final answer* field is a
+    # short conclusion sentence (e.g. "x^2 is even."), which can slip under
+    # _looks_symbolic's word-count guard and get compared as a symbolic
+    # expression, producing a nonsense "disagrees" on a correct proof. When
+    # the caller knows the real type (fix #7's classifier), that must
+    # override the text-length guess, not just supplement it.
+    monkeypatch.setenv("MODEL_PROVIDER", "openai")
+    monkeypatch.setenv("MODEL_API_KEY", "fake-key-for-test")
+    monkeypatch.setattr(
+        p1_solution, "call_model_json",
+        lambda prompt, max_tokens=512: {"final_answer": "2(2k^2), so x^2 is even."},
+    )
+    problem = Problem(
+        assignment_id=Assignment(label="hw", title="HW", type="math").id,
+        label="Q1", statement="Prove that if x is even, then x^2 is even.", points_possible=5,
+        reference_answer="x^2 is even.",  # short -- would fool the text-only heuristic
+        reference_solution="Let x = 2k. Then x^2 = 4k^2 = 2(2k^2), which is even.",
+    )
+
+    # Without a known type: falls back to the old text heuristic, which this
+    # short conclusion fools -- documenting the gap, not endorsing it.
+    ok_unknown, note_unknown = p1_solution.verify_solution(problem)
+    assert ok_unknown is False
+    assert "disagrees" in note_unknown
+
+    # With the real type known: authoritatively skipped, never compared.
+    ok_typed, note_typed = p1_solution.verify_solution(problem, problem_type="proof")
+    assert ok_typed is None
+    assert "no objective check" in note_typed
 
 
 def test_draft_rubric_points_the_rubric_at_the_real_assignment_not_the_fixture():

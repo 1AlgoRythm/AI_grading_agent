@@ -11,13 +11,29 @@ from lanes.p3_review import InMemoryAuditLog, finalize, override_problem_score
 from lanes.p3_storage import P3Store
 
 
-def test_feedback_is_grounded_in_score_rubric_and_evidence():
+def test_feedback_is_grounded_in_score_and_evidence_not_the_rubric_text():
+    # The full rubric criterion (name + description, sometimes carrying raw
+    # "[source.txt]"-style tags baked in by draft_rubric) used to be dumped
+    # verbatim into student-facing feedback -- too much noise. Feedback
+    # should ground itself in the score and the grader's own evidence /
+    # partial-credit reason instead, and never repeat the criterion name.
     feedback = generate_feedback(f.sample_grade(), f.sample_rubric())
     assert "5/5" in feedback[f.Q1]
-    assert "Correct isolation and solution" in feedback[f.Q1]
     assert "Correct rearrangement" in feedback[f.Q1]
+    assert "Correct isolation and solution" not in feedback[f.Q1]
     assert "2.5/5" in feedback[f.Q2]
     assert "dropped the middle cross term" in feedback[f.Q2]
+
+
+def test_feedback_never_leaks_the_escalation_routing_note():
+    # p2_engine.py appends "Escalated to human review after unresolved
+    # critic disagreement." to `evidence` purely as an internal routing
+    # signal -- it must never reach the student-facing feedback text.
+    grade = f.sample_grade()
+    grade.problem_grades[0].evidence += " Escalated to human review after unresolved critic disagreement."
+    feedback = generate_feedback(grade, f.sample_rubric())
+    assert "Escalated" not in feedback[f.Q1]
+    assert "critic" not in feedback[f.Q1]
 
 
 def test_followup_fails_closed_without_registered_context(monkeypatch):

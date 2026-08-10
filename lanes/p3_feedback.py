@@ -19,50 +19,53 @@ __all__ = [
 ]
 
 
+_ESCALATION_NOTE = re.compile(
+    r"\s*Escalated to human review after unresolved critic disagreement\.?\s*$"
+)
+
+
 def _clean(text: str | None) -> str:
-    return re.sub(r"\s+", " ", text or "").strip()
+    # Strips the internal-process note p2_engine.py appends to `evidence` on
+    # escalation -- that's a routing signal for the human review queue, not
+    # something a student should ever read as part of their feedback.
+    text = re.sub(r"\s+", " ", text or "").strip()
+    return _ESCALATION_NOTE.sub("", text).strip()
 
 
-def _criterion_summary(grade: ProblemGrade, rubric: Rubric) -> str:
-    criteria = rubric.for_problem(grade.problem_id)
-    if not criteria:
-        return "the requirements for this problem"
-    return "; ".join(
-        f"{_clean(item.name)}: {_clean(item.description).rstrip('.')}" for item in criteria
-    )
-
-
-def _feedback_for_problem(problem_grade: ProblemGrade, rubric: Rubric) -> str:
+def _feedback_for_problem(problem_grade: ProblemGrade) -> str:
     score = f"{problem_grade.points_awarded:g}/{problem_grade.points_possible:g}"
-    criterion = _criterion_summary(problem_grade, rubric)
-    evidence = _clean(problem_grade.evidence)
 
     if problem_grade.outcome is ProblemOutcome.NO_ANSWER:
-        return f"Score: {score}. No answer was provided. Review {criterion}."
+        return f"Score: {score}. No answer was provided."
     if problem_grade.outcome is ProblemOutcome.UNGRADEABLE:
         return (
             f"Score: {score}. The submitted response could not be graded. "
-            f"Please ask the instructor to review it. Relevant rubric: {criterion}."
+            "Please ask the instructor to review it."
         )
 
     if problem_grade.points_awarded == problem_grade.points_possible:
-        result = f"Full credit. Your work met {criterion}."
-        action = " Keep using this approach and show the key steps clearly."
+        result = "Full credit."
     else:
         reason = _clean(problem_grade.partial_credit_reason)
-        result = f"Partial credit. {reason or 'The response met only part of the rubric.'}"
-        action = f" Next step: compare your work with {criterion}."
+        result = f"Partial credit. {reason}" if reason else "Partial credit."
 
-    evidence_sentence = f" Evidence: {evidence}" if evidence else ""
-    return f"Score: {score}. {result}{evidence_sentence}{action}"
+    evidence = _clean(problem_grade.evidence)
+    evidence_sentence = f" {evidence}" if evidence else ""
+    return f"Score: {score}. {result}{evidence_sentence}"
 
 
 def generate_feedback(grade: Grade, rubric: Rubric) -> dict[UUID, str]:
-    """Produce one rubric- and evidence-grounded explanation per problem."""
+    """Produce one score- and evidence-grounded explanation per problem.
+
+    `rubric` is accepted (and validated against) rather than dropped, since
+    every caller already has both and passing a grade/rubric pair from two
+    different assignments is exactly the kind of mismatch worth catching
+    here instead of silently producing feedback for the wrong criteria.
+    """
     if grade.assignment_id != rubric.assignment_id:
         raise ValueError("grade and rubric must belong to the same assignment")
     return {
-        item.problem_id: _feedback_for_problem(item, rubric)
+        item.problem_id: _feedback_for_problem(item)
         for item in grade.problem_grades
     }
 

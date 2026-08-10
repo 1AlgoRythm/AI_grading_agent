@@ -10,12 +10,12 @@ import os
 import streamlit as st
 
 import fixtures
-from contracts import ArtifactStatus
+from contracts import ArtifactStatus, ProblemOutcome
 from lanes.p1_storage import P1Store
 from lanes.p2_storage import P2Store
 from lanes.p3_evaluation import evaluate_runs
 from lanes.p3_feedback import answer_followup, generate_feedback, register_feedback_context
-from lanes.p3_review import finalize, override_problem_score
+from lanes.p3_review import finalize
 from lanes.p3_storage import P3Store
 
 
@@ -102,50 +102,19 @@ def _initialize_demo() -> None:
 
 
 def _render_problem_review(index: int) -> None:
-    grade = st.session_state.p3_grade
-    rubric = st.session_state.p3_rubric
-    problem_grade = grade.problem_grades[index]
-    criterion = rubric.for_problem(problem_grade.problem_id)
-
-    st.subheader(f"Problem {problem_grade.problem_id.hex[-2:]}")
-    st.write(f"**Proposed score:** {problem_grade.points_awarded:g}/{problem_grade.points_possible:g}")
-    if criterion:
-        st.write(f"**Rubric:** {criterion[0].name} — {criterion[0].description}")
-    st.write(f"**Evidence:** {problem_grade.evidence or 'No evidence recorded.'}")
-    if problem_grade.partial_credit_reason:
-        st.write(f"**Partial-credit reason:** {problem_grade.partial_credit_reason}")
-
-    with st.form(f"override-{problem_grade.problem_id}"):
-        points = st.number_input(
-            "Override score",
-            min_value=0.0,
-            max_value=float(problem_grade.points_possible),
-            value=float(problem_grade.points_awarded),
-            step=0.5,
-            key=f"points-{problem_grade.problem_id}",
-        )
-        reason = st.text_input("Reason for override", key=f"reason-{problem_grade.problem_id}")
-        submitted = st.form_submit_button(
-            "Save override", disabled=grade.status is ArtifactStatus.APPROVED
-        )
-        if submitted:
-            try:
-                override_problem_score(
-                    grade, problem_grade.problem_id, points,
-                    st.session_state.approver_id, reason,
-                    st.session_state.audit_log,
-                )
-            except (ValueError, KeyError) as exc:
-                st.error(str(exc))
-            else:
-                # Re-persist to P2's `grades` table -- otherwise the human's
-                # override only lives in this audit-log entry and Streamlit's
-                # session state, and the source of truth P2Store still shows
-                # the original, un-overridden score.
-                _, p2_store, _ = _get_stores()
-                p2_store.save(grade, st.session_state.p3_trace)
-                st.success("Override saved, added to the audit log, and re-persisted.")
-                st.rerun()
+    # Score-only display -- overriding a score is a p2_app.py ("grade and
+    # trace") action now, not this screen's. Keeping an override form here
+    # too meant two places could edit the same grade with two separate
+    # audit trails; this screen is read-only review + feedback + approval.
+    problem_grade = st.session_state.p3_grade.problem_grades[index]
+    tag = problem_grade.problem_id.hex[-2:]
+    score = f"{problem_grade.points_awarded:g}/{problem_grade.points_possible:g}"
+    if problem_grade.outcome is ProblemOutcome.NO_ANSWER:
+        st.write(f"**Problem {tag}:** {score} (no answer submitted)")
+    elif problem_grade.outcome is ProblemOutcome.UNGRADEABLE:
+        st.write(f"**Problem {tag}:** {score} (could not be graded)")
+    else:
+        st.write(f"**Problem {tag}:** {score}")
 
 
 def _render_chat() -> None:
@@ -177,7 +146,7 @@ def render() -> None:
         st.metric("Total", f"{grade.total_awarded:g}/{grade.total_possible:g}")
         st.write(f"Status: **{grade.status.value}** · Resolution: **{grade.resolution.value}**")
         if grade.escalated:
-            st.warning("Escalated — override a score to resolve it, then approve.")
+            st.warning("Escalated — resolve it with an override in the P2 grade-and-trace app, then approve here.")
         for index in range(len(grade.problem_grades)):
             _render_problem_review(index)
 

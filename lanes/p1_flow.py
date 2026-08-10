@@ -43,7 +43,7 @@ class AgenticRunResult:
     # GradingContext.problem_type); surfacing requires the caller to be able
     # to see *which* problems were a confident detection versus a fallback.
     classifications: dict[UUID, ProblemTypeClassification] = field(default_factory=dict)
-    verification_notes: dict[UUID, tuple[bool, str]] = field(default_factory=dict)
+    verification_notes: dict[UUID, tuple[Optional[bool], str]] = field(default_factory=dict)
     submission: Optional[Submission] = None
     grade: Optional[Grade] = None
     trace: Optional[Trace] = None
@@ -78,17 +78,22 @@ def process_assignment_agentic(
     assignment = ingest_assignment(assignment_source)
 
     classifications: dict[UUID, ProblemTypeClassification] = {}
-    verification_notes: dict[UUID, tuple[bool, str]] = {}
+    verification_notes: dict[UUID, tuple[Optional[bool], str]] = {}
     method_context: dict[UUID, Optional[str]] = {}
 
     for problem in assignment.problems:
-        classifications[problem.id] = classify_problem_type(problem.statement)
+        classification = classify_problem_type(problem.statement)
+        classifications[problem.id] = classification
 
         snippet = retrieve_method_from_textbook(problem.statement)
         method_context[problem.id] = snippet
 
         develop_solution(problem, method_context=snippet)
-        verification_notes[problem.id] = verify_solution(problem)
+        # Pass the detected type through so self-consistency knows whether
+        # this problem even has a symbolically comparable answer, instead of
+        # guessing from the reference text alone (a short proof conclusion
+        # like "x^2 is even." can fool that guess -- see p1_solution.py).
+        verification_notes[problem.id] = verify_solution(problem, problem_type=classification.type)
         problem.solution_status = ArtifactStatus.APPROVED  # the agent's own approval
 
     rubric = draft_rubric(assignment, method_context=method_context)
