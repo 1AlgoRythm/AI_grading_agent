@@ -241,6 +241,19 @@ def main() -> None:
     if st.session_state.pop("_pending_clear_cookie", False):
         _clear_session_cookie()
 
+    # Same "deferred to the next run" shape as the cookie writes above, and
+    # for the same kind of reason: the sidebar radio below is keyed
+    # "active_screen" so a screen can navigate programmatically (e.g. the
+    # submissions roster's "View" button jumping to Grade & Trace), but
+    # Streamlit refuses to let anything assign to a widget's own key once
+    # that widget has been instantiated in the current run -- and the radio
+    # renders before the page body that would want to request the jump.
+    # Stashing the request under a different key and applying it here,
+    # before the radio exists yet this run, avoids that.
+    pending_screen = st.session_state.pop("_pending_active_screen", None)
+    if pending_screen is not None:
+        st.session_state.active_screen = pending_screen
+
     user: User | None = st.session_state.get("user")
     if user is None:
         user = _restore_user_from_cookie(store)
@@ -276,7 +289,12 @@ def main() -> None:
         pages = dict(STUDENT_PAGES)
 
     with st.sidebar:
-        page = st.radio("Screen", list(pages.keys()))
+        # Keyed so a screen can navigate programmatically (set
+        # st.session_state.active_screen, then st.rerun()) -- e.g. the
+        # submissions roster's "View" button jumps straight to Grade &
+        # Trace instead of loading the submission but leaving the instructor
+        # on the wrong tab with no indication anything happened.
+        page = st.radio("Screen", list(pages.keys()), key="active_screen")
         st.divider()
         if not (os.getenv("MODEL_PROVIDER") and os.getenv("MODEL_API_KEY")):
             st.warning("No BYOK model configured — running deterministic offline fallbacks.")

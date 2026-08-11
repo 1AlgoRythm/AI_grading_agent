@@ -460,6 +460,56 @@ def _render_batch_results_table(assignment, p2_store: P2Store) -> None:
         _activate_batch_row(assignment, submission, grade, trace, rubric)
 
 
+def _render_submissions_roster(
+    assignment, p1_store: P1Store, p2_store: P2Store, course_store: CourseStore,
+) -> None:
+    """The instructor's course-scoped view of who has submitted. Students
+    now submit (and get auto-graded) directly through student_app.py, so
+    p2_store.grades_for_assignment alone -- raw UUIDs, no student identity,
+    no course scoping -- stopped being enough once upload was no longer
+    this screen's only path in. Escalated rows sort first since those need
+    a human's attention before anything else here."""
+    grades = p2_store.grades_for_assignment(assignment.id)
+    if not grades:
+        return
+
+    st.subheader(f"Submissions for '{assignment.label}'")
+    email_by_submission = course_store.student_emails_for_assignment(str(assignment.id))
+    header = st.columns([3, 3, 2, 1, 1])
+    for col, label in zip(header, ["Student", "IDs", "Score", "Escalated", ""]):
+        col.caption(label)
+    for grade in sorted(grades, key=lambda g: not g.escalated):
+        email = email_by_submission.get(str(grade.submission_id), "unassigned")
+        col1, col2, col3, col4, col5 = st.columns([3, 3, 2, 1, 1])
+        with col1:
+            st.write(email)
+        with col2:
+            st.caption(f"submission {grade.submission_id.hex[-6:]} · grade {grade.id.hex[-6:]}")
+        with col3:
+            st.write(f"{grade.total_awarded:g}/{grade.total_possible:g} ({grade.fraction:.0%})")
+        with col4:
+            st.write("Yes" if grade.escalated else "No")
+        with col5:
+            # Also navigates to Grade & Trace -- loading the submission but
+            # leaving the instructor on this tab looked like the click had
+            # silently done nothing. Requested via the _pending_active_screen
+            # handoff (app.py's main()), not a direct assignment to
+            # st.session_state.active_screen: that key belongs to the
+            # sidebar radio, which has already been instantiated earlier in
+            # this same run (app.py renders the sidebar before dispatching
+            # to this page), and Streamlit refuses to let anything else
+            # assign to a widget's own key after it's been created.
+            if st.button("View", key=f"roster-view-{grade.id}"):
+                reason = active_selection.load_active_from_db(
+                    assignment.id, grade.submission_id, p1_store, p2_store,
+                )
+                if reason:
+                    st.error(reason)
+                else:
+                    st.session_state["_pending_active_screen"] = "Grade & Trace"
+                    st.rerun()
+
+
 def _render_submission_and_grading(p2_store: P2Store) -> None:
     """The other half of the P1 -> P2 handoff: ingest a real submission,
     build its budget-checked context, hand both to P2's grade(), and persist
@@ -469,10 +519,18 @@ def _render_submission_and_grading(p2_store: P2Store) -> None:
     course_store = _get_course_store()
     assignment = st.session_state.assignment
     rubric = st.session_state.rubric
-    st.header("4. Upload a submission & grade it")
+    st.header("4. Review submissions & grade")
     if rubric is None or rubric.status is not ArtifactStatus.APPROVED:
         st.info("Approve the rubric above before grading a submission.")
         return
+
+    # Students now submit directly through student_app.py and get
+    # auto-graded -- reviewing what they've turned in is the main path
+    # through this screen now, so the roster leads; uploading on a
+    # student's behalf (work handed in outside the portal) follows below.
+    _render_submissions_roster(assignment, p1_store, p2_store, course_store)
+    st.divider()
+    st.subheader("Upload a submission")
 
     # Stage 2 of the auth build: stamp student_id so ownership is
     # unambiguous later, even when two students share a display name. This
@@ -490,13 +548,28 @@ def _render_submission_and_grading(p2_store: P2Store) -> None:
         if linked_course_id is not None:
             course_store.resolve_enrollment_ids(_get_user_store())
             enrollments = course_store.list_enrollments(linked_course_id)
-            if enrollments:
-                options = ["-- unassigned --"] + [e.student_email for e in enrollments]
+            # An enrollment's student_id stays None until that email
+            # registers an account. Offering it here anyway used to set
+            # assign_student_id=None while still labeling the submission
+            # with the email -- the grade then looked owned but the
+            # `if owner.student_id:` guard below silently skipped
+            # record_submission_owner(), so it belonged to nobody and never
+            # showed up in that student's portal. Only registered
+            # enrollments are assignable; the rest are surfaced, not hidden.
+            assignable = [e for e in enrollments if e.student_id]
+            unassignable = [e for e in enrollments if not e.student_id]
+            if assignable:
+                options = ["-- unassigned --"] + [e.student_email for e in assignable]
                 choice = st.selectbox("Assign this submission to an enrolled student (optional)", options)
                 if choice != "-- unassigned --":
-                    chosen = next(e for e in enrollments if e.student_email == choice)
+                    chosen = next(e for e in assignable if e.student_email == choice)
                     assign_student_id = chosen.student_id
                     assign_student_label = choice
+            if unassignable:
+                st.caption(
+                    "Not assignable yet (not registered): "
+                    + ", ".join(e.student_email for e in unassignable)
+                )
 
     uploaded = st.file_uploader(
         "Submission file(s) (.txt, .md, .ipynb, .pdf)", type=["txt", "md", "ipynb", "pdf"],
@@ -598,23 +671,6 @@ def _render_submission_and_grading(p2_store: P2Store) -> None:
             f"**Trace:** stop={trace.stop_reason.value}, revisions={trace.num_revisions}"
         )
         st.caption(f"grade_id={grade.id} · submission_id={submission.id} · open this in p2_app.py / p3_app.py")
-
-    history = p2_store.grades_for_assignment(assignment.id)
-    if history:
-        st.subheader(f"Previously graded submissions for '{assignment.label}'")
-        for g in history:
-            col1, col2 = st.columns([4, 1])
-            with col1:
-                st.write(f"submission {g.submission_id}: grade {g.id} — {g.total_awarded:g}/{g.total_possible:g}")
-            with col2:
-                # Makes this submission the active one everywhere (P2/P3
-                # follow), not just something you can read about here.
-                if st.button("View", key=f"view-hist-{g.id}"):
-                    reason = active_selection.load_active_from_db(assignment.id, g.submission_id, p1_store, p2_store)
-                    if reason:
-                        st.error(reason)
-                    else:
-                        st.rerun()
 
 
 def render() -> None:

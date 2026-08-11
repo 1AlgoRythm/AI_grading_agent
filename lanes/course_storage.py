@@ -264,3 +264,41 @@ class CourseStore:
         for submission_id in self.submissions_for_student(student_id):
             grades.extend(p2_store.grades_for_submission(submission_id))
         return grades
+
+    def student_emails_for_assignment(self, assignment_id: str) -> dict[str, str]:
+        """submission_id -> student email for every owned submission on this
+        assignment, for the instructor's roster (p1_app.py). Resolved
+        through EnrollmentRecord -- it already carries both student_id and
+        email from enrollment, so this stays a self-contained join within
+        this store instead of a second round trip through UserStore."""
+        with Session(self.engine) as session:
+            owners = session.scalars(
+                select(SubmissionOwnerRecord).where(SubmissionOwnerRecord.assignment_id == assignment_id)
+            ).all()
+            if not owners:
+                return {}
+            student_ids = {o.student_id for o in owners}
+            enrollments = session.scalars(
+                select(EnrollmentRecord).where(EnrollmentRecord.student_id.in_(student_ids))
+            ).all()
+            email_by_student_id = {e.student_id: e.student_email for e in enrollments}
+            return {
+                o.submission_id: email_by_student_id[o.student_id]
+                for o in owners if o.student_id in email_by_student_id
+            }
+
+    def email_for_submission(self, submission_id: str) -> Optional[str]:
+        """Single-submission counterpart to student_emails_for_assignment,
+        for screens (p2_app.py/p3_app.py) that only ever have one grade in
+        view at a time. None when the submission has no recorded owner, or
+        the owner's enrollment hasn't carried an email in (shouldn't happen,
+        since an owner's student_id only ever comes from a resolved
+        enrollment, but this stays a lookup miss rather than a KeyError)."""
+        student_id = self.owner_for_submission(submission_id)
+        if student_id is None:
+            return None
+        with Session(self.engine) as session:
+            record = session.scalars(
+                select(EnrollmentRecord).where(EnrollmentRecord.student_id == student_id)
+            ).first()
+            return record.student_email if record is not None else None

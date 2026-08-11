@@ -30,6 +30,7 @@ import fixtures
 from contracts import ProblemOutcome, StepKind, problem_label_map
 from lanes import active_selection
 from lanes import p2_grading as p2
+from lanes.course_storage import CourseStore
 from lanes.p1_storage import P1Store
 from lanes.p2_storage import P2Store
 from lanes.p3_review import override_problem_score
@@ -43,6 +44,15 @@ STEP_ICONS = {
     StepKind.CRITIQUE: "🧑‍⚖️",
     StepKind.REVISION: "✏️",
 }
+
+
+def _get_course_store() -> CourseStore:
+    # Same fallback-creation pattern as p1_app.py's own _get_course_store --
+    # this screen can also run standalone (`streamlit run p2_app.py`), with
+    # no app.py to have created it first under the same session key.
+    if "course_store" not in st.session_state:
+        st.session_state.course_store = CourseStore(os.getenv("DATABASE_URL", "sqlite:///grading_demo.db"))
+    return st.session_state.course_store
 
 
 def _initialize_demo() -> None:
@@ -190,6 +200,11 @@ def render() -> None:
 
     st.title("AI Grading Agent")
     st.caption("P2 — grader + critic trace review and score override")
+    # Best-effort, same reasoning as label_map above -- a demo-fixture or
+    # instructor-uploaded submission has no recorded owner, so this is
+    # "unassigned" rather than a crash.
+    email = _get_course_store().email_for_submission(str(grade.submission_id))
+    st.caption(f"Student: {email or 'unassigned'} · submission {grade.submission_id.hex[-6:]}")
     st.session_state.approver_id = st.text_input("Reviewer ID", value="instructor_1")
     st.metric("Total", f"{grade.total_awarded:g}/{grade.total_possible:g}")
     if grade.escalated:

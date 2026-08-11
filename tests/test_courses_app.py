@@ -164,3 +164,55 @@ def test_existing_grading_flow_is_unaffected_when_no_one_is_assigning_a_submissi
     submission, grade, _ = at.session_state["last_grade"]
     assert submission.student_id is None
     assert "5/5" in [m.value for m in at.metric][0] if at.metric else True
+
+
+def test_an_unregistered_enrollment_is_not_assignable_and_is_explained_not_hidden(tmp_path, monkeypatch):
+    # Bug: an enrollment's student_id stays None until that email registers.
+    # Offering it in the "assign to a student" selectbox anyway used to
+    # stamp the submission with the email as a label but student_id=None,
+    # which then silently skipped record_submission_owner() -- the grade
+    # looked owned but belonged to nobody and never showed up in that
+    # student's portal. Fixed: only registered enrollments are selectable,
+    # and the rest are surfaced in a caption instead of disappearing.
+    db_url = f"sqlite:///{tmp_path / 'app.db'}"
+    monkeypatch.setenv("DATABASE_URL", db_url)
+    from streamlit.testing.v1 import AppTest
+    from lanes.course_storage import CourseStore
+
+    at = AppTest.from_file(APP_PATH)
+    at.run()
+    _register(at, role="instructor", name="Prof", email="prof@example.com", password="pw12345")
+    _login(at, _ADMIN_EMAIL, _ADMIN_PASSWORD)
+    next(b for b in at.button if b.label == "Approve").click().run()
+    next(b for b in at.button if b.label == "Log out").click().run()
+    _login(at, "prof@example.com", "pw12345")
+
+    at.sidebar.text_input(key="new-course-name").set_value("Algebra 101").run()
+    at.sidebar.button(key="create-course").click().run()
+    at.sidebar.text_input(key="enroll-email").set_value("nobody@uni.edu").run()
+    at.sidebar.button(key="enroll-submit").click().run()
+
+    at.text_area[0].set_value("HW\n\nProblem A (5 points): Solve for x: 2x + 6 = 10.").run()
+    next(b for b in at.button if b.label == "Ingest assignment").click().run()
+    at.sidebar.button(key="link-assignment-course").click().run()
+    next(b for b in at.button if b.label.startswith("Develop solution for")).click().run(timeout=30)
+    next(b for b in at.button if b.label == "Approve solution").click().run()
+    next(b for b in at.button if b.label == "Draft rubric").click().run(timeout=30)
+    next(b for b in at.button if b.label == "Approve rubric").click().run()
+
+    assign_boxes = [
+        sb for sb in at.selectbox if sb.label == "Assign this submission to an enrolled student (optional)"
+    ]
+    assert not assign_boxes  # nobody registered yet -- nothing to assign to
+    assert any("nobody@uni.edu" in c.value and "not registered" in c.value.lower() for c in at.caption)
+
+    next(ta for ta in at.text_area if ta.label == "...or paste the submission text directly").set_value(
+        "Problem A\nFinal answer: x = 2"
+    ).run(timeout=30)
+    next(b for b in at.button if b.label == "Ingest & grade submission").click().run(timeout=30)
+
+    submission, grade, _ = at.session_state["last_grade"]
+    assert submission.student_id is None  # left unassigned, not silently mislabeled
+
+    course_store = CourseStore(db_url)
+    assert course_store.owner_for_submission(str(submission.id)) is None

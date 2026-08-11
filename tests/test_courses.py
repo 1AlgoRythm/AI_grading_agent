@@ -147,3 +147,47 @@ def test_submission_builds_with_and_without_student_id():
 
     with_id = Submission(assignment_id=uuid4(), student_label="Maya", student_id="user-123")
     assert with_id.student_id == "user-123"
+
+
+def test_student_emails_for_assignment_resolves_through_enrollment(tmp_path):
+    course_store = CourseStore(f"sqlite:///{tmp_path / 'courses.db'}")
+    user_store = UserStore(f"sqlite:///{tmp_path / 'auth.db'}")
+    course = course_store.create_course("instructor-1", "Algebra")
+    course_store.enroll_student(course.id, "maya@uni.edu")
+    maya = user_store.create_user("maya@uni.edu", "pw", "student", "Maya", "active")
+    course_store.resolve_enrollment_ids(user_store)
+    course_store.record_submission_owner("submission-1", maya.id, "assignment-1")
+
+    assert course_store.student_emails_for_assignment("assignment-1") == {"submission-1": "maya@uni.edu"}
+
+
+def test_student_emails_for_assignment_is_empty_when_no_submission_has_an_owner(tmp_path):
+    store = CourseStore(f"sqlite:///{tmp_path / 'courses.db'}")
+    assert store.student_emails_for_assignment("assignment-1") == {}
+
+
+def test_student_emails_for_assignment_omits_an_owner_with_no_matching_enrollment(tmp_path):
+    # An owner's student_id always comes from a resolved enrollment in
+    # practice, but this stays a lookup miss rather than a KeyError if that
+    # invariant is ever violated (e.g. the enrollment row is later removed).
+    store = CourseStore(f"sqlite:///{tmp_path / 'courses.db'}")
+    store.record_submission_owner("submission-1", "student-with-no-enrollment", "assignment-1")
+
+    assert store.student_emails_for_assignment("assignment-1") == {}
+
+
+def test_email_for_submission_resolves_through_enrollment(tmp_path):
+    course_store = CourseStore(f"sqlite:///{tmp_path / 'courses.db'}")
+    user_store = UserStore(f"sqlite:///{tmp_path / 'auth.db'}")
+    course = course_store.create_course("instructor-1", "Algebra")
+    course_store.enroll_student(course.id, "maya@uni.edu")
+    maya = user_store.create_user("maya@uni.edu", "pw", "student", "Maya", "active")
+    course_store.resolve_enrollment_ids(user_store)
+    course_store.record_submission_owner("submission-1", maya.id, "assignment-1")
+
+    assert course_store.email_for_submission("submission-1") == "maya@uni.edu"
+
+
+def test_email_for_submission_is_none_when_the_submission_has_no_owner(tmp_path):
+    store = CourseStore(f"sqlite:///{tmp_path / 'courses.db'}")
+    assert store.email_for_submission("submission-1") is None

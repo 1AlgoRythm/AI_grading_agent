@@ -251,12 +251,17 @@ def _render_regrade_queue(p1_store: P1Store, p2_store: P2Store, user) -> None:
         return
 
     requests.sort(key=lambda r: (r.status != "open", r.created_at))
+    # Labeled by student email, not just a submission id fragment -- an
+    # instructor triaging several requests needs to know whose it is at a
+    # glance, the same reason the submissions roster above leads with email.
     options = {
-        f"[{r.status}] {r.created_at:%Y-%m-%d %H:%M} -- submission {r.submission_id[-6:]}": r
+        f"[{r.status}] {course_store.email_for_submission(r.submission_id) or 'unassigned'} "
+        f"({r.created_at:%Y-%m-%d %H:%M})": r
         for r in requests
     }
     choice = st.selectbox("Requests (open first)", list(options.keys()), key="regrade-queue-picker")
     request = options[choice]
+    st.caption(f"submission {request.submission_id[-6:]}")
 
     for msg in regrade_store.messages_for_request(request.id):
         who = "Student" if msg.author_role == "student" else "You"
@@ -312,6 +317,12 @@ def render() -> None:
 
     st.title("AI Grading Agent")
     st.caption("P3 — grounded feedback, human review, audit, and evaluation")
+    # Best-effort, same reasoning as label_map above -- a demo-fixture or
+    # instructor-uploaded submission has no recorded owner, so this is
+    # "unassigned" rather than a crash.
+    course_store, _ = _get_course_and_regrade_stores()
+    email = course_store.email_for_submission(str(grade.submission_id))
+    st.caption(f"Student: {email or 'unassigned'} · submission {grade.submission_id.hex[-6:]}")
     st.session_state.approver_id = st.text_input("Reviewer ID", value="instructor_1")
 
     left, right = st.columns([3, 2])
