@@ -103,8 +103,12 @@ def test_student_self_upload_through_the_real_portal_stamps_their_own_student_id
     ).run()
     next(b for b in at.button if b.label == "Submit").click().run(timeout=30)
 
+    # st.success(...) here is immediately followed by st.rerun() (the same
+    # established pattern as p1_app.py's "Ingest assignment") -- the toast
+    # is already gone by the time .run() returns, so assert on the
+    # persisted effect (the status flip) instead.
     assert not at.exception
-    assert any("submitted" in s.value.lower() for s in at.success)
+    assert any("awaiting grade" in c.value.lower() for c in at.caption)
 
     course_store = CourseStore(db_url)
     submission_ids = course_store.submissions_for_student("student-1")
