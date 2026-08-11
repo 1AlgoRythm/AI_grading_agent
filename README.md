@@ -190,3 +190,6 @@ overrides are recorded so the team can build that dataset over time.
   team conversation, because it can silently break another lane.
 - BYOK: the model provider + key come from environment config — never commit
   a key.
+
+
+https://drive.google.com/drive/folders/1vmOi_DnN_q8dmZZsy1dbTqFFfDZ70EAI?usp=share_link
