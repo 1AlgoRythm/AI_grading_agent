@@ -208,7 +208,17 @@ class P1Store:
         with Session(self.engine) as session:
             session.execute(delete(TextbookChunkRecord).where(TextbookChunkRecord.source_path == source_path))
             for index, chunk in enumerate(chunks, start=1):
-                session.add(TextbookChunkRecord(source_path=source_path, chunk_index=index, content=chunk))
+                # Postgres text columns reject an embedded NUL (0x00) byte
+                # outright -- sqlite (local dev) accepts it silently, which
+                # is exactly how a stray NUL from a PDF-extraction artifact
+                # sat unnoticed in the corpus until the first real-Postgres
+                # deployment crashed indexing it. Stripped here defensively
+                # (the actual DB write boundary) regardless of which source
+                # file it came from, on top of the fix at PDF-extraction time
+                # in lanes/p1_io.py's _read_pdf_text.
+                session.add(TextbookChunkRecord(
+                    source_path=source_path, chunk_index=index, content=chunk.replace("\x00", ""),
+                ))
             session.commit()
 
     def textbook_chunks(self) -> list[tuple[str, str]]:

@@ -1194,6 +1194,39 @@ def test_p1_store_persists_the_textbook_index(tmp_path):
     assert store.textbook_chunks() == [("algebra.txt", "replaced")]
 
 
+def test_index_textbook_chunks_strips_embedded_nul_bytes(tmp_path):
+    # Postgres text columns reject an embedded NUL (0x00) byte outright --
+    # sqlite (used here, and in local dev) silently accepts it, which is
+    # exactly how a stray NUL from a PDF-extraction artifact went unnoticed
+    # until the first real-Postgres deployment crashed indexing it.
+    from lanes.p1_storage import P1Store
+
+    store = P1Store(f"sqlite:///{tmp_path / 'p1.db'}")
+    store.index_textbook_chunks("weird.md", ["before\x00after"])
+
+    assert store.textbook_chunks() == [("weird.md", "beforeafter")]
+
+
+def test_read_pdf_text_strips_embedded_nul_bytes(monkeypatch, tmp_path):
+    from lanes.p1_io import _read_pdf_text
+
+    class FakePage:
+        def extract_text(self):
+            return "before\x00after"
+
+    class FakeReader:
+        def __init__(self, path):
+            self.pages = [FakePage()]
+
+    monkeypatch.setattr("pypdf.PdfReader", FakeReader)
+    fake_pdf = tmp_path / "fake.pdf"
+    fake_pdf.write_bytes(b"%PDF-1.4 fake -- PdfReader is mocked, content is irrelevant")
+
+    text = _read_pdf_text(fake_pdf)
+
+    assert text == "beforeafter"
+
+
 def test_sync_textbook_index_indexes_the_textbook_folder(tmp_path, monkeypatch):
     from lanes.p1_storage import P1Store
 

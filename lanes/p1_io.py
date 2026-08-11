@@ -45,7 +45,18 @@ def _read_pdf_text(path: Path) -> str | None:
             pages = []
             for page in reader.pages:
                 pages.append(page.extract_text() or "")
-            return "\n".join(pages).strip()
+            text = "\n".join(pages).strip()
+            # PDF extractors occasionally emit a stray NUL byte (seen in
+            # practice from a font/glyph mapping edge case) -- harmless in
+            # sqlite, but Postgres's text type physically cannot represent
+            # one (it's a C-string wire format under the hood), so a NUL
+            # that reaches a real deployment's database crashes on insert.
+            # Stripped once here, at the one place PDF bytes become text,
+            # rather than at every downstream call site that might store it
+            # (assignment/submission ingestion already sanitizes separately
+            # via _sanitize_text below; textbook uploads route straight to
+            # disk with no such pass, which is what this actually guards).
+            return text.replace("\x00", "")
         except Exception:
             continue
     return None
