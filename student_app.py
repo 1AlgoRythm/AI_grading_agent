@@ -63,13 +63,16 @@ def _write_uploaded_file(uploaded) -> str:
 
 
 def _best_grade(grades: list[Grade]) -> Optional[Grade]:
-    """Prefer a published (approved) grade over a still-pending one when a
-    student has more than one grade recorded for the same assignment --
-    "graded" must win over "awaiting grade" in the status shown."""
+    """Prefer a published grade over a still-unpublished one when a student
+    has more than one grade recorded for the same assignment -- "graded"
+    must win over "awaiting grade" in the status shown. Stage 5: visibility
+    keys on `published` (a soft, still-editable state), not the harder
+    APPROVED lock -- finalize() sets both, so an approved grade is always
+    published too, but a merely-published one need not be approved yet."""
     if not grades:
         return None
-    approved = [g for g in grades if g.status is ArtifactStatus.APPROVED]
-    return approved[0] if approved else grades[0]
+    published = [g for g in grades if g.published]
+    return published[0] if published else grades[0]
 
 
 def _render_upload(p1_store: P1Store, p2_store: P2Store, course_store: CourseStore, user, assignment) -> None:
@@ -222,7 +225,7 @@ def render() -> None:
                 if grade is None:
                     st.caption("Status: not submitted")
                     _render_upload(p1_store, p2_store, course_store, user, assignment)
-                elif grade.status is not ArtifactStatus.APPROVED:
+                elif not grade.published:
                     st.caption("Status: submitted -- awaiting grade")
                 else:
                     st.caption("Status: graded")

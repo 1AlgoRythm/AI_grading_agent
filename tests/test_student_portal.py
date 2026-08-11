@@ -164,6 +164,10 @@ def test_regrade_request_via_the_real_portal_ui_is_scoped_to_the_logged_in_stude
     grade, trace = p2.grade(submission, rubric, context)
     grade.approver_id = "instructor_1"
     grade.status = ArtifactStatus.APPROVED
+    # Stage 5: the student portal keys visibility on `published`, not the
+    # hard APPROVED lock -- set alongside status here to mirror what
+    # finalize() does for real.
+    grade.published = True
     P2Store(db_url).save(grade, trace)
     CourseStore(db_url).record_submission_owner(str(submission.id), "student-1", str(assignment.id))
 

@@ -409,6 +409,17 @@ class Grade(BaseModel):
     approver_id: Optional[str] = None
     approved_at: Optional[datetime] = None
 
+    # Stage 5 of the auth build (lanes/p3_review.py's publish_grade): a
+    # SOFTER visibility gate than `status`/APPROVED. Publishing makes a
+    # grade visible to the student without locking it -- the instructor can
+    # still reopen and override it, then publish again. `status is APPROVED`
+    # remains the hard lock (finalize() sets published True too, so an
+    # approved grade is always published, but a merely-published grade need
+    # not be approved). Optional/defaulted so every existing caller, fixture,
+    # and test that builds a Grade without it keeps working unchanged.
+    published: bool = False
+    published_at: Optional[datetime] = None
+
     @property
     def total_awarded(self) -> float:
         return round(sum(g.points_awarded for g in self.problem_grades), 4)
@@ -424,8 +435,8 @@ class Grade(BaseModel):
 
     @model_validator(mode="after")
     def _approval_consistency(self) -> "Grade":
-        if self.status is ArtifactStatus.APPROVED and self.approver_id is None:
-            raise ValueError("an approved grade must record an approver_id")
+        if (self.status is ArtifactStatus.APPROVED or self.published) and self.approver_id is None:
+            raise ValueError("an approved or published grade must record an approver_id")
         return self
 
 

@@ -6,18 +6,21 @@ Run with: ``streamlit run p3_app.py``
 from __future__ import annotations
 
 import os
+from uuid import UUID
 
 import streamlit as st
 
 import fixtures
 from contracts import ArtifactStatus, ProblemOutcome, problem_label_map
 from lanes import active_selection
+from lanes.course_storage import CourseStore
 from lanes.p1_storage import P1Store
 from lanes.p2_storage import P2Store
 from lanes.p3_evaluation import evaluate_runs
 from lanes.p3_feedback import generate_feedback
-from lanes.p3_review import finalize
+from lanes.p3_review import finalize, override_problem_score, publish_grade, reopen_grade
 from lanes.p3_storage import P3Store
+from lanes.regrade_storage import RegradeStore
 from session_cache import shared_grade
 
 
@@ -36,6 +39,19 @@ def _get_stores() -> tuple[P1Store, P2Store, P3Store]:
     if "audit_log" not in st.session_state:
         st.session_state.audit_log = P3Store(db_url)
     return st.session_state.p1_store, st.session_state.p2_store, st.session_state.audit_log
+
+
+def _get_course_and_regrade_stores() -> tuple[CourseStore, RegradeStore]:
+    # Kept separate from _get_stores() -- that tuple's shape is read by
+    # every other call site as (p1_store, p2_store, audit_log); growing it
+    # would mean touching all of them for two stores only Stage 5's
+    # publish/regrade UI needs.
+    db_url = os.getenv("DATABASE_URL", "sqlite:///grading_demo.db")
+    if "course_store" not in st.session_state:
+        st.session_state.course_store = CourseStore(db_url)
+    if "regrade_store" not in st.session_state:
+        st.session_state.regrade_store = RegradeStore(db_url)
+    return st.session_state.course_store, st.session_state.regrade_store
 
 
 def _load(grade, rubric, trace, assignment_id) -> None:
@@ -150,6 +166,135 @@ def _render_problem_review(index: int, label_map: dict) -> None:
         st.write(f"**Problem {tag}:** {score}")
 
 
+def _render_publish_controls(grade, label_map: dict) -> None:
+    """Stage 5: `published` is a SOFTER visibility gate than the hard
+    APPROVED lock -- the student portal shows a grade once it's published,
+    but (unlike `finalize`) the instructor can still reopen and change it.
+    Approving still sets `published` too (see `finalize`), so an approved
+    grade shows here as locked, not as a separate, contradictory state."""
+    if not grade.published:
+        if st.button("Publish grade", key=f"publish-{grade.id}"):
+            active_assignment_id, active_submission_id, _, _, active_rubric = active_selection.get_active()
+            try:
+                publish_grade(grade, st.session_state.approver_id, expected_submission_id=active_submission_id)
+            except ValueError as exc:
+                st.error(str(exc))
+            else:
+                _, p2_store, _ = _get_stores()
+                p2_store.save(grade, st.session_state.p3_trace)
+                active_selection.set_active(
+                    active_assignment_id, active_submission_id, grade, st.session_state.p3_trace, active_rubric,
+                )
+                st.success("Grade published -- the student can now see it.")
+                st.rerun()
+        return
+
+    if grade.status is ArtifactStatus.APPROVED:
+        st.caption("Published (locked -- approved).")
+        return
+
+    st.caption("Published -- visible to the student, and still editable.")
+    with st.expander("Change published grade", expanded=False):
+        reason = st.text_input("Reason for the change", key=f"reopen-reason-{grade.id}")
+        new_points: dict = {}
+        for problem_grade in grade.problem_grades:
+            if problem_grade.outcome is not ProblemOutcome.GRADED:
+                continue
+            tag = label_map.get(problem_grade.problem_id, problem_grade.problem_id.hex[-2:])
+            new_points[problem_grade.problem_id] = st.number_input(
+                f"{tag} -- new score", min_value=0.0, max_value=float(problem_grade.points_possible),
+                value=float(problem_grade.points_awarded), step=0.5,
+                key=f"reopen-points-{problem_grade.problem_id}",
+            )
+        if st.button("Save changes & re-publish", key=f"reopen-save-{grade.id}"):
+            active_assignment_id, active_submission_id, _, _, active_rubric = active_selection.get_active()
+            try:
+                reopen_grade(grade, st.session_state.approver_id, reason, expected_submission_id=active_submission_id)
+                for problem_grade in grade.problem_grades:
+                    new_value = new_points.get(problem_grade.problem_id)
+                    if new_value is not None and new_value != problem_grade.points_awarded:
+                        override_problem_score(
+                            grade, problem_grade.problem_id, new_value,
+                            st.session_state.approver_id, reason, st.session_state.audit_log,
+                            expected_submission_id=active_submission_id,
+                        )
+                publish_grade(grade, st.session_state.approver_id, expected_submission_id=active_submission_id)
+            except (ValueError, KeyError) as exc:
+                st.error(str(exc))
+            else:
+                _, p2_store, _ = _get_stores()
+                p2_store.save(grade, st.session_state.p3_trace)
+                active_selection.set_active(
+                    active_assignment_id, active_submission_id, grade, st.session_state.p3_trace, active_rubric,
+                )
+                st.success("Grade updated and re-published -- the student now sees the new score.")
+                st.rerun()
+
+
+def _render_regrade_queue(p1_store: P1Store, p2_store: P2Store, user) -> None:
+    """Stage 5's instructor-facing consumer of Stage 4's student-side
+    regrade requests: pending (open) requests first, then resolved/closed.
+    Scoped to the logged-in instructor's own courses/assignments -- an
+    instructor never sees another instructor's requests."""
+    st.header("Regrade requests")
+    course_store, regrade_store = _get_course_and_regrade_stores()
+
+    my_courses = course_store.list_courses(instructor_id=user.id)
+    my_assignment_ids = {
+        assignment_id
+        for course in my_courses
+        for assignment_id in course_store.assignments_for_course(course.id)
+    }
+    requests = [r for r in regrade_store.list_requests() if r.assignment_id in my_assignment_ids]
+    if not requests:
+        st.caption("No regrade requests yet.")
+        return
+
+    requests.sort(key=lambda r: (r.status != "open", r.created_at))
+    options = {
+        f"[{r.status}] {r.created_at:%Y-%m-%d %H:%M} -- submission {r.submission_id[-6:]}": r
+        for r in requests
+    }
+    choice = st.selectbox("Requests (open first)", list(options.keys()), key="regrade-queue-picker")
+    request = options[choice]
+
+    for msg in regrade_store.messages_for_request(request.id):
+        who = "Student" if msg.author_role == "student" else "You"
+        st.write(f"**{who}:** {msg.body}")
+
+    if st.button("Focus this submission above (Grade review)", key=f"regrade-focus-{request.id}"):
+        reason = active_selection.load_active_from_db(
+            UUID(request.assignment_id), UUID(request.submission_id), p1_store, p2_store,
+        )
+        if reason:
+            st.error(reason)
+        else:
+            _mirror_active_into_p3_state()
+            st.rerun()
+
+    if request.status == "closed":
+        st.caption("This request is closed.")
+        return
+
+    reply = st.text_area("Reply", key=f"regrade-queue-reply-{request.id}")
+    if st.button("Send reply", key=f"regrade-queue-reply-submit-{request.id}"):
+        if not reply.strip():
+            st.error("Reply must not be blank.")
+        else:
+            regrade_store.add_message(request.id, author_role="instructor", author_id=user.id, body=reply)
+            st.rerun()
+
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("Resolve", key=f"regrade-resolve-{request.id}"):
+            regrade_store.set_status(request.id, "resolved")
+            st.rerun()
+    with col2:
+        if st.button("Close", key=f"regrade-close-{request.id}"):
+            regrade_store.set_status(request.id, "closed")
+            st.rerun()
+
+
 def render() -> None:
     _initialize_demo()
     _render_data_source_picker()
@@ -204,6 +349,9 @@ def render() -> None:
                 st.success("Grade approved and re-persisted.")
                 st.rerun()
 
+        st.divider()
+        _render_publish_controls(grade, label_map)
+
     with right:
         st.header("Grounded feedback")
         for problem_id, text in generate_feedback(grade, rubric).items():
@@ -236,6 +384,16 @@ def render() -> None:
                 f"{entry.previous_points:g} → {entry.new_points:g} "
                 f"by {entry.approver_id} — {entry.reason}"
             )
+
+    # Stage 5: instructor-only, and only meaningful under the unified
+    # app.py's login gate -- `user` is None on a standalone `streamlit run
+    # p3_app.py`, where there is no course/instructor context to scope
+    # requests to.
+    user = st.session_state.get("user")
+    if user is not None and user.role == "instructor":
+        st.divider()
+        p1_store, p2_store, _ = _get_stores()
+        _render_regrade_queue(p1_store, p2_store, user)
 
 
 if __name__ == "__main__":

@@ -160,4 +160,65 @@ def finalize(grade: Grade, approver_id: str, expected_submission_id: Optional[UU
         grade.resolution = GradeResolution.HUMAN_CONFIRMED
     grade.approved_at = now()
     grade.status = ArtifactStatus.APPROVED
+    # Stage 5: approving is strictly stronger than publishing -- a finalized
+    # grade must stay visible to the student under the published-based
+    # visibility rule, not regress to invisible just because it went
+    # straight to the hard lock without an explicit publish step first.
+    grade.published = True
+    grade.published_at = grade.approved_at
+    return grade
+
+
+def publish_grade(grade: Grade, approver_id: str, expected_submission_id: Optional[UUID] = None) -> Grade:
+    """Make a grade visible to the student (Stage 4/5's student portal keys
+    visibility on `published`) WITHOUT finalizing/locking it -- the
+    instructor can still change it via `reopen_grade` + `override_problem_score`
+    and publish again. Guarded exactly like `finalize`/`override_problem_score`
+    (see their docstrings for what `expected_submission_id` protects against).
+
+    An escalated grade must be resolved before publishing, mirroring
+    finalize's own escalation guard: "visible but definitely wrong" isn't a
+    safer state than "not yet visible."
+    """
+    if expected_submission_id is not None and grade.submission_id != expected_submission_id:
+        raise ValueError("refusing to publish: this grade does not belong to the active submission")
+    approver_id = approver_id.strip()
+    if not approver_id:
+        raise ValueError("approver_id is required")
+    if grade.escalated:
+        raise ValueError("an escalated grade must be resolved before publishing")
+    grade.approver_id = approver_id
+    grade.published = True
+    grade.published_at = now()
+    return grade
+
+
+def reopen_grade(
+    grade: Grade, approver_id: str, reason: str, expected_submission_id: Optional[UUID] = None,
+) -> Grade:
+    """Allow editing a PUBLISHED grade -- publishing was never a lock, so
+    this doesn't require (or touch) the hard APPROVED status; an actually
+    APPROVED grade stays genuinely locked (the subsequent
+    `override_problem_score` call refuses one anyway, but this checks first
+    for a clearer, more specific error).
+
+    A validating seam the UI calls before `override_problem_score`, not a
+    second audit-log writer: the audited "who changed what, when, why"
+    record for the edit itself is `override_problem_score`'s own
+    `OverrideAuditEntry` -- pass this same `reason` into it, rather than
+    inventing a second, differently-shaped record for one edit. Re-publishing
+    afterward is a separate, explicit `publish_grade()` call, so nothing is
+    ever persisted mid-edit for the student to see a half-updated grade.
+    """
+    if expected_submission_id is not None and grade.submission_id != expected_submission_id:
+        raise ValueError("refusing to reopen: this grade does not belong to the active submission")
+    approver_id, reason = approver_id.strip(), reason.strip()
+    if not approver_id:
+        raise ValueError("approver_id is required")
+    if not reason:
+        raise ValueError("a reason is required to reopen a published grade")
+    if grade.status is ArtifactStatus.APPROVED:
+        raise ValueError("an approved grade is locked and cannot be reopened")
+    if not grade.published:
+        raise ValueError("only a published grade can be reopened")
     return grade

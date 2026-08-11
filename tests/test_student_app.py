@@ -55,6 +55,11 @@ def _seed_graded_submission(db_url: str, *, approved: bool, student_id: str = "s
     if approved:
         grade.approver_id = "instructor_1"
         grade.status = ArtifactStatus.APPROVED
+        # Stage 5: the student portal now keys visibility on `published`
+        # (a softer, still-editable state), not the hard APPROVED lock --
+        # finalize() sets both together, so a real "approved" grade sets
+        # this too rather than leaving it stale here.
+        grade.published = True
 
     p2_store = P2Store(db_url)
     p2_store.save(grade, trace)

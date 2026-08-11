@@ -180,3 +180,19 @@ class RegradeStore:
                 .order_by(RegradeRequestRecord.created_at)
             ).all()
             return [_to_request(r) for r in records]
+
+    def list_requests(
+        self, *, status: Optional[str] = None, assignment_id: Optional[str] = None,
+    ) -> list[RegradeRequest]:
+        """Stage 5's instructor queue: every request (optionally filtered),
+        not scoped to one student -- the caller (p3_app.py) further filters
+        by which assignments belong to the logged-in instructor's own
+        courses, since this store has no notion of "instructor" itself."""
+        query = select(RegradeRequestRecord)
+        if status is not None:
+            query = query.where(RegradeRequestRecord.status == status)
+        if assignment_id is not None:
+            query = query.where(RegradeRequestRecord.assignment_id == assignment_id)
+        query = query.order_by(RegradeRequestRecord.created_at)
+        with Session(self.engine) as session:
+            return [_to_request(r) for r in session.scalars(query).all()]

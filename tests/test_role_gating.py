@@ -45,6 +45,10 @@ def _grade_one(db_url: str, student_id: str, final_answer: str = "x = 2"):
     grade, trace = p2.grade(submission, rubric, context)
     grade.approver_id = "instructor_1"
     grade.status = ArtifactStatus.APPROVED
+    # Stage 5: the student portal keys visibility on `published`, not the
+    # hard APPROVED lock -- set alongside status here to mirror what
+    # finalize() does for real.
+    grade.published = True
 
     p2_store = P2Store(db_url)
     p2_store.save(grade, trace)
@@ -213,6 +217,9 @@ def test_two_students_each_see_only_their_own_grade_never_the_others(tmp_path, m
     amy_grade = p2_store.grades_for_submission(amy_submission_id)[0]
     amy_grade.approver_id = "instructor_1"
     amy_grade.status = ArtifactStatus.APPROVED
+    # Stage 5: the student portal keys visibility on `published`, not the
+    # hard APPROVED lock.
+    amy_grade.published = True
     p2_store.save(amy_grade, p2_store.get_trace(amy_grade.id))
 
     # UI-level proof: a *fresh* login session per student (rather than
