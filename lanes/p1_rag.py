@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING, Optional
 if TYPE_CHECKING:
     from lanes.p1_storage import P1Store
 
-__all__ = ["retrieve_method_from_textbook", "sync_textbook_index"]
+__all__ = ["rehydrate_textbook_from_db", "retrieve_method_from_textbook", "sync_textbook_index"]
 
 def _tokenize(text: str) -> set[str]:
     return set(re.findall(r"\w+", text.lower()))
@@ -285,3 +285,41 @@ def sync_textbook_index(store: "P1Store") -> int:
         store.index_textbook_chunks(str(path), chunks)
         total += len(chunks)
     return total
+
+
+def rehydrate_textbook_from_db(store: "P1Store") -> int:
+    """Restore `textbook/` from the DB-backed `textbook_index` table when
+    the filesystem copy is missing or empty -- e.g. a fresh container with
+    no volume mounted for `textbook/`, after a restart. The DB copy already
+    survives restarts (same database the rest of the app persists through)
+    but `sync_textbook_index` only ever writes filesystem -> DB; nothing
+    reads it back the other way without this, so retrieval silently found
+    nothing even though the exact same content was sitting right there.
+
+    A no-op, safe to call unconditionally on every render, whenever the
+    filesystem already has content -- a live, possibly-newer on-disk corpus
+    is never clobbered by a DB snapshot that could be stale. Reconstructs
+    each source file by concatenating its chunks in order; `_chunk_text`'s
+    overlap means the result isn't a byte-perfect restore, but retrieval
+    only needs a faithful-enough corpus to score against, not an exact copy.
+    Returns the number of files restored.
+    """
+    if _list_textbook_sources():
+        return 0
+
+    chunks_by_source: dict[str, list[str]] = {}
+    for source_path, content in store.textbook_chunks():
+        chunks_by_source.setdefault(source_path, []).append(content)
+    if not chunks_by_source:
+        return 0
+
+    tb_dir = Path(os.getcwd()) / "textbook"
+    tb_dir.mkdir(exist_ok=True)
+    restored = 0
+    for source_path, chunks in chunks_by_source.items():
+        name = Path(source_path).name
+        if not name:
+            continue
+        (tb_dir / name).write_text("\n".join(chunks), encoding="utf8")
+        restored += 1
+    return restored

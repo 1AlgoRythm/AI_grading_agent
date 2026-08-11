@@ -16,7 +16,7 @@ import os
 import streamlit as st
 
 from contracts import ArtifactStatus
-from lanes.p1_rag import retrieve_method_from_textbook
+from lanes.p1_rag import rehydrate_textbook_from_db, retrieve_method_from_textbook
 from lanes.p1_storage import P1Store
 from lanes.p2_storage import P2Store
 from lanes.p3_feedback import answer_followup, feedback_history, register_feedback_context
@@ -36,6 +36,10 @@ def render() -> None:
     st.caption("Student feedback chat — ask why you lost a point on a graded submission")
 
     p1_store, p2_store = _get_stores()
+    # Defensive: p1_app.py's sidebar is the primary place this runs, but a
+    # fresh container could land here first (a no-op once textbook/ already
+    # has content, so cheap to check unconditionally).
+    rehydrate_textbook_from_db(p1_store)
 
     assignments = p1_store.list_assignments()
     if not assignments:

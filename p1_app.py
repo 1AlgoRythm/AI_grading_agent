@@ -517,6 +517,14 @@ def render() -> None:
 
     with st.sidebar:
         st.header("Textbook index")
+        # Restores textbook/ from the DB when the filesystem copy is
+        # missing (e.g. a fresh container with no volume for it, after a
+        # restart) -- a no-op once the filesystem already has content, so
+        # this is cheap to check on every render.
+        restored_count = p1_rag.rehydrate_textbook_from_db(store)
+        if restored_count:
+            st.caption(f"Restored {restored_count} file(s) from the database (no local copy was found on disk).")
+
         uploaded_textbook = st.file_uploader(
             "Add course material (.txt, .md, .pdf)", type=["txt", "md", "pdf"], key="textbook-upload",
         )

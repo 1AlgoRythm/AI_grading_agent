@@ -1208,3 +1208,63 @@ def test_sync_textbook_index_indexes_the_textbook_folder(tmp_path, monkeypatch):
     assert total >= 1
     chunks = store.textbook_chunks()
     assert any("expand squares" in content.lower() for _, content in chunks)
+
+
+def test_rehydrate_textbook_from_db_restores_files_missing_from_disk(tmp_path, monkeypatch):
+    # The real gap: sync_textbook_index only ever writes filesystem -> DB.
+    # A fresh container with no volume for textbook/ has nothing on disk
+    # after a restart even though the exact same content survived in the
+    # (volume-backed) database all along -- rehydrate is the other
+    # direction, DB -> filesystem, so retrieval finds it again.
+    from lanes.p1_storage import P1Store
+
+    monkeypatch.chdir(tmp_path)
+    store = P1Store(f"sqlite:///{tmp_path / 'p1.db'}")
+    store.index_textbook_chunks(
+        str(tmp_path / "textbook" / "algebra.txt"),
+        ["To expand squares, use", "(a+b)^2 = a^2 + 2ab + b^2."],
+    )
+    assert not (tmp_path / "textbook").exists()
+
+    restored = p1_rag.rehydrate_textbook_from_db(store)
+
+    assert restored == 1
+    restored_file = tmp_path / "textbook" / "algebra.txt"
+    assert restored_file.exists()
+    assert "expand squares" in restored_file.read_text().lower()
+
+    # And retrieval actually works again afterward -- not just "a file
+    # exists," but the thing this whole fix is for.
+    p1_rag._INDEX_CACHE.clear()
+    snippet = p1_rag.retrieve_method_from_textbook("How do I expand (a+b)^2?")
+    assert snippet is not None
+    assert "expand squares" in snippet.lower()
+
+
+def test_rehydrate_textbook_from_db_never_overwrites_a_live_filesystem_corpus(tmp_path, monkeypatch):
+    # A live, possibly-newer on-disk file must never be clobbered by a
+    # (possibly stale) DB snapshot -- this only fills a genuine gap, it's
+    # not a "DB is the source of truth, always restore" operation.
+    from lanes.p1_storage import P1Store
+
+    monkeypatch.chdir(tmp_path)
+    textbook = tmp_path / "textbook"
+    textbook.mkdir()
+    (textbook / "algebra.txt").write_text("Live, current content on disk.", encoding="utf8")
+
+    store = P1Store(f"sqlite:///{tmp_path / 'p1.db'}")
+    store.index_textbook_chunks(str(textbook / "algebra.txt"), ["Stale DB content from before."])
+
+    restored = p1_rag.rehydrate_textbook_from_db(store)
+
+    assert restored == 0
+    assert (textbook / "algebra.txt").read_text() == "Live, current content on disk."
+
+
+def test_rehydrate_textbook_from_db_returns_zero_with_nothing_in_the_db_either(tmp_path, monkeypatch):
+    from lanes.p1_storage import P1Store
+
+    monkeypatch.chdir(tmp_path)
+    store = P1Store(f"sqlite:///{tmp_path / 'p1.db'}")
+    assert p1_rag.rehydrate_textbook_from_db(store) == 0
+    assert not (tmp_path / "textbook").exists()
