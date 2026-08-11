@@ -21,6 +21,7 @@ from __future__ import annotations
 import os
 import tempfile
 from pathlib import Path
+from typing import Optional
 
 import streamlit as st
 
@@ -28,6 +29,7 @@ from contracts import ArtifactStatus
 from lanes import p1_ingestion as p1
 from lanes import p1_rag
 from lanes import p2_grading as p2
+from lanes.p1_io import _read_pdf_text
 from lanes.p1_storage import P1Store
 from lanes.p2_storage import P2Store
 
@@ -41,6 +43,49 @@ def _write_uploaded_file(uploaded) -> str:
     dest = tmp_dir / (uploaded.name or "upload.txt")
     dest.write_bytes(uploaded.getvalue())
     return str(dest)
+
+
+def _save_textbook_upload(uploaded) -> Path:
+    """Persist an uploaded textbook/course-material file into textbook/ so
+    it joins the retrieval corpus. Unlike _write_uploaded_file (a scratch
+    temp path for one ingest call), this must land in the real, persistent
+    textbook/ directory -- that's the only place _list_textbook_sources()
+    looks. PDFs are extracted to .md since that function only reads
+    .txt/.md (a PDF dropped in directly is silently invisible to it)."""
+    textbook_dir = Path("textbook")
+    textbook_dir.mkdir(exist_ok=True)
+    name = uploaded.name or "upload.txt"
+    suffix = Path(name).suffix.lower()
+
+    if suffix == ".pdf":
+        tmp_dir = Path(tempfile.mkdtemp())
+        tmp_pdf = tmp_dir / name
+        tmp_pdf.write_bytes(uploaded.getvalue())
+        text = _read_pdf_text(tmp_pdf) or ""
+        dest = textbook_dir / f"{Path(name).stem}.md"
+        dest.write_text(text, encoding="utf8")
+    else:
+        dest = textbook_dir / name
+        dest.write_bytes(uploaded.getvalue())
+    return dest
+
+
+def _auto_sync_textbook_if_changed(store: P1Store) -> Optional[int]:
+    """Sync textbook/ into the DB only when the on-disk corpus actually
+    changed since the last sync (mtime+size fingerprint) -- no manual
+    button click required, whether the change came from the uploader or a
+    file dropped into textbook/ directly, and no needless DB write on every
+    single Streamlit rerun when nothing changed. Returns the chunk count
+    when a sync actually ran, None on a no-op."""
+    sources = p1_rag._list_textbook_sources()
+    if not sources:
+        return None
+    fingerprint = p1_rag._corpus_fingerprint(sources)
+    if st.session_state.get("textbook_sync_fingerprint") == fingerprint:
+        return None
+    count = p1_rag.sync_textbook_index(store)
+    st.session_state.textbook_sync_fingerprint = fingerprint
+    return count
 
 
 def _get_store() -> P1Store:
@@ -281,9 +326,17 @@ def render() -> None:
 
     with st.sidebar:
         st.header("Textbook index")
-        if st.button("Sync textbook/ folder to the database"):
-            count = p1_rag.sync_textbook_index(store)
-            st.success(f"Indexed {count} chunk(s) into the textbook_index table.")
+        uploaded_textbook = st.file_uploader(
+            "Add course material (.txt, .md, .pdf)", type=["txt", "md", "pdf"], key="textbook-upload",
+        )
+        if uploaded_textbook is not None and st.session_state.get("last_textbook_upload") != uploaded_textbook.name:
+            dest = _save_textbook_upload(uploaded_textbook)
+            st.session_state.last_textbook_upload = uploaded_textbook.name
+            st.success(f"Saved {dest.name} to textbook/.")
+
+        synced_count = _auto_sync_textbook_if_changed(store)
+        if synced_count is not None:
+            st.caption(f"Auto-synced: indexed {synced_count} chunk(s).")
         st.caption(f"{len(store.textbook_chunks())} chunk(s) currently indexed.")
 
     _render_upload(store)
