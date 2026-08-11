@@ -692,6 +692,53 @@ def test_draft_rubric_caps_the_embedded_textbook_snippet():
     assert len(method_criterion.description) < 1000
 
 
+def test_generated_criteria_offline_fallback_has_multiple_criteria_summing_to_possible():
+    # The old offline template had only two criteria ("final answer" +
+    # "method"), and their points didn't even sum to the problem's total
+    # (1.5x it) -- not wrong (nothing mechanically sums criterion points,
+    # grading is one holistic judgment against points_possible), but far
+    # less for a real BYOK grader to reason with than an instructor's
+    # actual multi-facet rubric would give it.
+    assignment = Assignment(label="hw", title="HW", type="math")
+    problem = Problem(assignment_id=assignment.id, label="Q1", statement="Solve x + 2 = 5", points_possible=8)
+    assignment.problems.append(problem)
+
+    criteria = p1_solution._generated_criteria(assignment, {})
+
+    assert len(criteria) >= 4
+    assert sum(c["points"] for c in criteria) == pytest.approx(8.0)
+
+
+def test_draft_rubric_lets_the_real_model_choose_a_different_criteria_count_per_problem(monkeypatch):
+    # A one-line short-answer problem and a multi-step derivation shouldn't
+    # be forced into the same fixed criteria count -- the real-model prompt
+    # asks the LLM to decide this per problem, and draft_rubric must accept
+    # whatever count comes back rather than normalizing it.
+    assignment = Assignment(label="hw", title="HW", type="math")
+    short = Problem(assignment_id=assignment.id, label="Q1", statement="One-line short answer", points_possible=2)
+    long_problem = Problem(assignment_id=assignment.id, label="Q2", statement="Multi-step derivation", points_possible=10)
+    assignment.problems.extend([short, long_problem])
+
+    fake_response = {
+        "criteria": [
+            {"problem_id": str(short.id), "name": "Correct answer", "description": "d", "points": 2},
+            {"problem_id": str(long_problem.id), "name": "Setup", "description": "d", "points": 2},
+            {"problem_id": str(long_problem.id), "name": "Correct algebra", "description": "d", "points": 3},
+            {"problem_id": str(long_problem.id), "name": "Correct final answer", "description": "d", "points": 3},
+            {"problem_id": str(long_problem.id), "name": "Clear justification", "description": "d", "points": 2},
+        ]
+    }
+    monkeypatch.setattr(p1_solution, "call_model_json", lambda prompt, max_tokens=1024, **kw: fake_response)
+
+    rubric = p1_solution.draft_rubric(assignment, {})
+
+    by_problem: dict = {}
+    for c in rubric.criteria:
+        by_problem.setdefault(c.problem_id, []).append(c.name)
+    assert len(by_problem[short.id]) == 1
+    assert len(by_problem[long_problem.id]) == 4
+
+
 def test_draft_rubric_gives_each_assignment_its_own_rubric_id(tmp_path):
     # sample_rubric() also carries the fixture's own rubric id. Reusing it
     # for every assignment meant P1Store.save_rubric (merge on id, delete

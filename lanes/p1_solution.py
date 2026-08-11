@@ -165,15 +165,27 @@ def develop_solution(
 
 
 def _generated_criteria(assignment: Assignment, method_context: dict) -> list[dict]:
+    """Offline template: four proportioned criteria per problem instead of
+    two. The old template gave "final answer" the full points AND "method"
+    half the points on top -- 1.5x the problem's total, which only worked
+    because nothing mechanically sums criterion points (grading is a single
+    holistic judgment against the whole problem's points_possible). Still
+    true here, but a real BYOK grader reads these criteria as descriptive
+    context for how to weight partial credit, so a rubric with only one or
+    two generic criteria gives it much less to reason with than an
+    instructor's actual multi-facet rubric would."""
     generated_criteria = []
     for p in assignment.problems:
+        possible = p.points_possible
+
         generated_criteria.append({
             "problem_id": p.id,
             "name": "Correct final answer",
             "description": "Final answer matches the approved reference.",
-            "points": p.points_possible,
+            "points": round(possible * 0.5, 4),
         })
-        method_description = "Key steps of a valid method are shown; small arithmetic slips tolerated."
+
+        method_description = "A valid method or approach is used to reach the answer."
         method_snippet = method_context.get(p.id)
         if method_snippet:
             # Bake the retrieved course method into the rubric itself (retrieval
@@ -185,9 +197,29 @@ def _generated_criteria(assignment: Assignment, method_context: dict) -> list[di
             method_description += f" Method from course material: {method_snippet[:800]}"
         generated_criteria.append({
             "problem_id": p.id,
-            "name": "Method / shown work",
+            "name": "Valid method or approach",
             "description": method_description,
-            "points": max(0.5, p.points_possible * 0.5),
+            "points": round(possible * 0.25, 4),
+        })
+
+        generated_criteria.append({
+            "problem_id": p.id,
+            "name": "Clearly shown work",
+            "description": (
+                "Key intermediate steps are shown clearly enough to follow the reasoning, "
+                "even if the final answer has a minor arithmetic slip."
+            ),
+            "points": round(possible * 0.15, 4),
+        })
+
+        generated_criteria.append({
+            "problem_id": p.id,
+            "name": "Free of unjustified leaps or errors",
+            "description": (
+                "No unexplained jumps in logic and no errors beyond the minor arithmetic "
+                "slips the leniency policy already tolerates."
+            ),
+            "points": round(possible * 0.10, 4),
         })
     return generated_criteria
 
@@ -225,6 +257,16 @@ def draft_rubric(assignment: Assignment, method_context: dict) -> Rubric:
     if method_snippets:
         prompt += "\n".join(method_snippets) + "\n"
     prompt += (
+        "For each problem, break the rubric into multiple distinct criteria that "
+        "separately assess the different things a grader would actually check -- e.g. "
+        "the final answer, the method/approach, how clearly the work is shown, whether "
+        "the reasoning has unjustified leaps -- but a problem-specific breakdown you judge "
+        "more useful is better than forcing every problem into the same mold. Decide the "
+        "number of criteria yourself, based on how many distinct things are actually worth "
+        "grading separately for THAT problem -- a one-line short-answer question may "
+        "genuinely need only one or two; a multi-step derivation may need four or five. "
+        "Each problem's criteria points should sum to that problem's total points_possible "
+        "given above.\n"
         "For each criterion, set \"problem_id\" to EXACTLY one of the problem_id "
         "strings given above (copy it verbatim) -- never invent a new one.\n"
         "Respond with ONLY a JSON object: {\"criteria\": [{\"problem_id\": <string>, "
