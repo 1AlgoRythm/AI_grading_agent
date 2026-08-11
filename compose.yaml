@@ -3,6 +3,18 @@ services:
     build: .
     ports:
       - "8501:8501"
+    volumes:
+      # lanes/p1_rag.py builds this chroma index at /app/.p1_textbook_index
+      # (relative to the Dockerfile's WORKDIR) and only rebuilds it when the
+      # on-disk textbook/ corpus's fingerprint changes -- without a volume
+      # here, the container's writable layer (and this index with it) is
+      # thrown away on every restart, so every restart paid the full
+      # re-index cost again for no reason. This is the fix, not committing
+      # the binary chroma database to git: it's fully regenerable from the
+      # textbook/ .txt/.md files already in the repo, and git handles a
+      # binary sqlite+HNSW blob (diffs badly, bloats the repo on every
+      # corpus change) far worse than a plain volume does.
+      - textbook_index:/app/.p1_textbook_index
     environment:
       DATABASE_URL: postgresql+psycopg://grading:grading@db:5432/grading
       MODEL_PROVIDER: ${MODEL_PROVIDER:-}
@@ -32,3 +44,4 @@ services:
 
 volumes:
   grading_data:
+  textbook_index:
