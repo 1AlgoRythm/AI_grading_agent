@@ -7,6 +7,7 @@ relying on the P2/P3 lanes.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -193,6 +194,34 @@ def test_retrieve_method_uses_textbook_folder(tmp_path, monkeypatch):
 
     assert snippet is not None
     assert "expand squares" in snippet.lower()
+
+
+def test_chunk_text_never_splits_a_word_across_chunk_boundaries():
+    # A raw character-count cut regularly split a word across two chunks
+    # (e.g. "...expand squar" / "es, use...") -- that garbled fragment then
+    # gets embedded verbatim into a rubric criterion or a solution-generation
+    # prompt. Neither the end nor the start of a chunk should land mid-word.
+    text = "To expand squares, use (a+b)^2 = a^2 + 2ab + b^2. " * 20
+    words_in_source = set(re.findall(r"\w+", text))
+
+    chunks = p1_rag._chunk_text(text, chunk_size=50, overlap=10)
+
+    assert len(chunks) > 1
+    fragments = [token for chunk in chunks for token in re.findall(r"\w+", chunk) if token not in words_in_source]
+    assert fragments == []
+
+
+def test_chunk_text_handles_a_token_longer_than_chunk_size():
+    # One token spanning an entire chunk_size+overlap window: no boundary
+    # exists to snap to, so this must fall back to a hard cut instead of
+    # looping forever or silently dropping content.
+    long_token = "x" * 200
+    chunks = p1_rag._chunk_text(f"start {long_token} end", chunk_size=50, overlap=10)
+
+    assert "".join(chunks[0:1]) == "start"
+    assert chunks[-1].endswith("end")
+    # No content lost: every 'x' from the source appears somewhere.
+    assert sum(chunk.count("x") for chunk in chunks) >= 200
 
 
 def test_retrieve_method_returns_multiple_sources_with_labels(tmp_path, monkeypatch):

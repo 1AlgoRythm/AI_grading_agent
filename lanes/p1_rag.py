@@ -44,6 +44,18 @@ def _significant_words(text: str) -> set[str]:
 
 
 def _chunk_text(text: str, chunk_size: int = 900, overlap: int = 120) -> list[str]:
+    """Split into overlapping chunks, snapping each boundary to the nearest
+    whitespace so a chunk never starts or ends mid-word.
+
+    A raw character-count cut (the previous behavior) regularly split a word
+    across two chunks -- e.g. "...expand squar" / "es, use..." -- and that
+    garbled fragment is exactly what gets embedded verbatim into a rubric
+    criterion's description or a solution-generation prompt. The start
+    boundary matters too, not just the end: a retrieved chunk is often shown
+    or embedded on its own, not read back-to-back with its neighbor, so a
+    chunk beginning "ares, use (a+b)^2..." (the tail of "squares") is just as
+    visibly garbled as one ending mid-word.
+    """
     text = text.strip()
     if not text:
         return []
@@ -54,10 +66,28 @@ def _chunk_text(text: str, chunk_size: int = 900, overlap: int = 120) -> list[st
     start = 0
     while start < len(text):
         end = min(len(text), start + chunk_size)
+        if end < len(text):
+            snapped = end
+            while snapped > start + 1 and not text[snapped - 1].isspace():
+                snapped -= 1
+            if snapped > start + 1:
+                end = snapped
+            # else: no whitespace anywhere in this window (one token longer
+            # than chunk_size) -- fall back to the hard cut rather than loop.
         chunks.append(text[start:end].strip())
         if end >= len(text):
             break
-        start = max(0, end - overlap)
+        next_start = max(start + 1, end - overlap)
+        snapped_start = next_start
+        while snapped_start < end and not text[snapped_start - 1].isspace():
+            snapped_start += 1
+        # The loop above exits two different ways: it *found* a boundary
+        # (text[snapped_start - 1] is whitespace, possibly right at `end`),
+        # or it ran out of room without finding one (one token spanning the
+        # whole window) -- `snapped_start < end` alone can't tell those
+        # apart, since a boundary found exactly at `end` also fails that
+        # check. Test the actual character, not just the position.
+        start = snapped_start if text[snapped_start - 1].isspace() else next_start
     return [chunk for chunk in chunks if chunk]
 
 
