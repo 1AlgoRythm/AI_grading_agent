@@ -31,12 +31,25 @@ def test_grading_on_the_upload_tab_is_immediately_visible_on_the_other_tabs(tmp_
 
     at.text_area[0].set_value("HW Test\n\nProblem A (5 points): Solve for x: 2x + 6 = 10.").run()
     next(b for b in at.button if b.label == "Ingest assignment").click().run()
-    next(b for b in at.button if b.label.startswith("Develop solution for")).click().run()
+    # Both of these touch lanes/p1_rag.py's textbook retrieval, which cold-starts
+    # chromadb + onnxruntime the first time it runs in a process (2-4s) -- comfortably
+    # past AppTest's 3s default `run()` timeout on a loaded CI box, which is exactly
+    # what made this test intermittently fail in CI with no code-path bug at all.
+    next(b for b in at.button if b.label.startswith("Develop solution for")).click().run(timeout=30)
     next(b for b in at.button if b.label == "Approve solution").click().run()
-    next(b for b in at.button if b.label == "Draft rubric").click().run()
+    next(b for b in at.button if b.label == "Draft rubric").click().run(timeout=30)
     next(b for b in at.button if b.label == "Approve rubric").click().run()
 
-    at.text_area[4].set_value("Problem A\nWork: 2x+6=10, x=2\nFinal answer: x = 2").run()
+    # Located by label, not a fixed index -- richer rubrics now add one
+    # "Description" text_area per criterion (and the count is LLM-decided per
+    # problem), which shifts a hardcoded index like `at.text_area[4]` onto a
+    # criterion field instead of the submission box. That silently left the
+    # submission box empty (so the grade button stayed disabled and nothing
+    # was ever graded) with no exception raised -- exactly what made this
+    # test's "5/5" assertion fail against a stale demo-fixture grade instead.
+    next(ta for ta in at.text_area if ta.label == "...or paste the submission text directly").set_value(
+        "Problem A\nWork: 2x+6=10, x=2\nFinal answer: x = 2"
+    ).run()
     next(b for b in at.button if b.label == "Ingest & grade submission").click().run()
 
     at.sidebar.radio[0].set_value("Grade & Trace").run()
