@@ -149,6 +149,153 @@ def test_ingest_submission_with_more_blank_line_paragraphs_than_problems_never_o
     assert len(context.problem_contexts) == 1
 
 
+def test_ingest_assignment_uses_the_llm_parser_when_a_model_is_configured(tmp_path, monkeypatch):
+    # The regex splitter only detects a "Problem N" heading at the START of a
+    # line -- exactly what PDF extraction routinely fails to preserve. This
+    # text has no line breaks at all, so the regex path would merge both
+    # problems into a single block; the LLM parser is asked to infer
+    # boundaries by meaning instead.
+    monkeypatch.setenv("MODEL_PROVIDER", "openai")
+    monkeypatch.setenv("MODEL_API_KEY", "fake-key-for-test")
+    monkeypatch.chdir(tmp_path)
+    messy_text = (
+        "HW3 Problem 1 (5 points): Solve for x: 2x+6=10. Problem 2 (3 points): "
+        "Expand (a+b)^2 using the binomial method described in lecture."
+    )
+    path = tmp_path / "hw3.txt"
+    path.write_text(messy_text, encoding="utf8")
+    fake_response = {
+        "problems": [
+            {"label": "Q1", "statement": "Solve for x: 2x+6=10.", "points": 5, "reference_answer": None},
+            {"label": "Q2", "statement": "Expand (a+b)^2 using the binomial method.", "points": 3, "reference_answer": None},
+        ]
+    }
+    monkeypatch.setattr(p1_io, "call_model_json", lambda prompt, max_tokens=2048: fake_response)
+
+    assignment = p1_io.ingest_assignment(str(path))
+
+    assert len(assignment.problems) == 2
+    assert assignment.problems[0].label == "Q1" and assignment.problems[0].points_possible == 5
+    assert assignment.problems[1].label == "Q2" and assignment.problems[1].points_possible == 3
+
+
+def test_ingest_assignment_falls_back_to_regex_when_llm_output_is_unusable(tmp_path, monkeypatch):
+    # Never let unstructured/partial model output produce a malformed
+    # Assignment -- an empty/invalid LLM response must fall through to the
+    # regex parser, not crash or silently drop problems.
+    monkeypatch.setenv("MODEL_PROVIDER", "openai")
+    monkeypatch.setenv("MODEL_API_KEY", "fake-key-for-test")
+    monkeypatch.chdir(tmp_path)
+    path = tmp_path / "hw3.txt"
+    path.write_text(
+        "HW 3\n\nProblem 1 (5 points): Solve for x in x + 2 = 5.\n\nProblem 2 (3 points): Expand (a+b)^2.",
+        encoding="utf8",
+    )
+    monkeypatch.setattr(p1_io, "call_model_json", lambda prompt, max_tokens=2048: {"version": 1, "criteria": "n/a"})
+
+    assignment = p1_io.ingest_assignment(str(path))
+
+    assert len(assignment.problems) == 2  # regex path still parsed it correctly
+    assert assignment.problems[0].label == "Q1"
+
+
+def test_ingest_submission_uses_the_llm_parser_when_a_model_is_configured(tmp_path, monkeypatch):
+    monkeypatch.setenv("MODEL_PROVIDER", "openai")
+    monkeypatch.setenv("MODEL_API_KEY", "fake-key-for-test")
+    monkeypatch.chdir(tmp_path)
+    assignment = Assignment(label="hw", title="HW", type="math")
+    q1 = Problem(assignment_id=assignment.id, label="Q1", statement="s1", points_possible=5)
+    q2 = Problem(assignment_id=assignment.id, label="Q2", statement="s2", points_possible=5)
+    assignment.problems = [q1, q2]
+    path = tmp_path / "student.txt"
+    path.write_text("some messy student text with no clean headings", encoding="utf8")
+    fake_response = {
+        "answers": [
+            {"label": "Q2", "work_text": "b", "final_answer": "2"},
+            {"label": "Q1", "work_text": "a", "final_answer": "1"},
+        ]
+    }
+    monkeypatch.setattr(p1_io, "call_model_json", lambda prompt, max_tokens=2048: fake_response)
+
+    submission = p1_io.ingest_submission(str(path), assignment=assignment)
+
+    # KEEPS the existing label-based mapping (_resolve_problem_id): answers
+    # land on the right real problem id regardless of the order returned.
+    by_problem = {a.problem_id: a.final_answer for a in submission.answers}
+    assert by_problem[q1.id] == "1"
+    assert by_problem[q2.id] == "2"
+
+
+def test_develop_solution_prompt_instructs_ignoring_irrelevant_grounding_and_never_copying(monkeypatch):
+    # Grounding, not copy-paste: an irrelevant retrieved chunk must be
+    # ignorable by the model and must never appear verbatim in student-facing
+    # output. Can't prove a real model *complies* without a real API call,
+    # but can prove the mechanism -- the instruction reaches the prompt, and
+    # nothing in this code re-injects the raw snippet into the output itself.
+    captured = {}
+
+    def fake(prompt, max_tokens=512):
+        captured["prompt"] = prompt
+        return {"solution": "Solve directly: 2x = 4, so x = 2.", "final_answer": "x = 2"}
+
+    monkeypatch.setattr(p1_solution, "call_model_json", fake)
+    problem = Problem(
+        assignment_id=Assignment(label="hw", title="HW", type="math").id,
+        label="not-a-fixture-label", statement="Solve for x: 2x + 6 = 10.", points_possible=5,
+    )
+    irrelevant_snippet = "A majority cycle in a tournament graph is a set of three vertices forming a 3-cycle."
+
+    p1_solution.develop_solution(problem, method_context=irrelevant_snippet)
+
+    assert "ignore it entirely" in captured["prompt"].lower()
+    assert "never quote or copy" in captured["prompt"].lower()
+    assert irrelevant_snippet not in problem.reference_solution
+
+
+def test_draft_rubric_prompt_instructs_ignoring_irrelevant_grounding_and_never_copying(monkeypatch):
+    captured = {}
+
+    def fake(prompt, max_tokens=1024, **kw):
+        captured["prompt"] = prompt
+        return {"criteria": []}  # unusable -> falls through to _generated_criteria
+
+    monkeypatch.setattr(p1_solution, "call_model_json", fake)
+    assignment = Assignment(label="hw", title="HW", type="math")
+    problem = Problem(assignment_id=assignment.id, label="Q1", statement="Solve x + 2 = 5", points_possible=5)
+    assignment.problems.append(problem)
+    irrelevant_snippet = "A majority cycle in a tournament graph is a set of three vertices forming a 3-cycle."
+
+    rubric = p1_solution.draft_rubric(assignment, {problem.id: irrelevant_snippet})
+
+    assert "ignore it entirely" in captured["prompt"].lower()
+    assert "never quote or copy" in captured["prompt"].lower()
+    for criterion in rubric.criteria:
+        assert irrelevant_snippet not in criterion.description
+
+
+def test_develop_solution_still_passes_relevant_grounding_into_the_prompt(monkeypatch):
+    # The other half of "grounding, not copy": relevant material must still
+    # reach the model (so it CAN be used), it just must not come back out
+    # verbatim in the output.
+    captured = {}
+
+    def fake(prompt, max_tokens=512):
+        captured["prompt"] = prompt
+        return {"solution": "Using the substitution method taught in class: x = 2.", "final_answer": "x = 2"}
+
+    monkeypatch.setattr(p1_solution, "call_model_json", fake)
+    problem = Problem(
+        assignment_id=Assignment(label="hw", title="HW", type="math").id,
+        label="not-a-fixture-label", statement="Solve for x: 2x + 6 = 10.", points_possible=5,
+    )
+    relevant_snippet = "To solve linear equations, isolate the variable using substitution."
+
+    p1_solution.develop_solution(problem, method_context=relevant_snippet)
+
+    assert relevant_snippet in captured["prompt"]
+    assert relevant_snippet not in problem.reference_solution
+
+
 @pytest.mark.parametrize(
     "injected",
     [
@@ -675,11 +822,14 @@ def test_draft_rubric_points_the_rubric_at_the_real_assignment_not_the_fixture()
     assert rubric.assignment_id == assignment.id
 
 
-def test_draft_rubric_caps_the_embedded_textbook_snippet():
-    # build_context sums the rubric criteria descriptions into
-    # estimated_tokens against DEFAULT_TOKEN_BUDGET -- an uncapped textbook
-    # excerpt (a real corpus section is much larger than algebra.txt) could
-    # blow the budget once baked into every problem's criteria.
+def test_draft_rubric_offline_fallback_never_embeds_the_raw_retrieved_snippet():
+    # Grounding, not copy-paste: the retrieved textbook chunk must inform
+    # rubric drafting, never be spliced verbatim into a criterion description
+    # that reaches the UI/feedback/student. The offline fallback used to
+    # concatenate the raw snippet directly (capped at 800 chars) -- capped,
+    # but still raw textbook text in student-facing output. There's no model
+    # to ask to paraphrase offline, so the fix is to never embed the actual
+    # retrieved text at all, only a generic note that grounding was used.
     assignment = Assignment(label="hw-real", title="Real HW", type="math")
     problem = Problem(assignment_id=assignment.id, label="Q1", statement="Solve x + 2 = 5", points_possible=5)
     assignment.problems.append(problem)
@@ -687,8 +837,9 @@ def test_draft_rubric_caps_the_embedded_textbook_snippet():
 
     rubric = p1_solution.draft_rubric(assignment, {problem.id: long_snippet})
 
-    method_criterion = next(c for c in rubric.criteria if "Method from course material" in c.description)
-    assert len(method_criterion.description) < 1000
+    for criterion in rubric.criteria:
+        assert long_snippet not in criterion.description
+        assert len(criterion.description) < 1000
 
 
 def test_generated_criteria_offline_fallback_has_multiple_criteria_summing_to_possible():

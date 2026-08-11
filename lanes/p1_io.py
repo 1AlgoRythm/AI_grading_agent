@@ -16,6 +16,7 @@ can replace the file readers without changing the exported function names.
 from __future__ import annotations
 
 import json
+import os
 import re
 from pathlib import Path
 from typing import Optional
@@ -23,6 +24,7 @@ from uuid import UUID
 
 import fixtures
 from contracts import ArtifactStatus, Assignment, Problem, Submission, SubmissionAnswer, new_id
+from model_provider import call_model_json
 
 __all__ = ["ingest_assignment", "ingest_submission"]
 
@@ -114,6 +116,10 @@ def _sanitize_text(text: str, max_length: int = 50_000) -> str:
     return text[:max_length]
 
 
+def _model_configured() -> bool:
+    return bool(os.getenv("MODEL_PROVIDER") and os.getenv("MODEL_API_KEY"))
+
+
 def _looks_like_problem_heading(line: str) -> bool:
     stripped = line.strip()
     if not stripped:
@@ -196,6 +202,84 @@ def _template_submission() -> Submission:
     return fixtures.sample_submission().model_copy(deep=True)
 
 
+def _llm_parse_assignment_problems(text: str) -> Optional[list[dict]]:
+    """Ask the model to split raw (possibly messy, PDF-extracted) text into
+    problems by meaning rather than by line position -- the regex splitter's
+    blind spot is a "Problem N" heading that doesn't land at the start of a
+    line (common in PDF-extracted text, where layout doesn't survive
+    extraction). Returns a validated list of problem dicts, or None on any
+    failure/unusable output; callers fall through to the regex parser.
+
+    Wraps the array in a {"problems": [...]} object rather than asking for a
+    bare top-level JSON array -- `call_model_json`'s `_extract_json` only
+    ever returns a dict (never a list), so a bare array response would
+    always fail extraction and silently demote to the offline stub shape.
+    """
+    prompt = (
+        "Split this assignment text into its individual problems. The text may be "
+        "messy or PDF-extracted -- headings might not start at the beginning of a "
+        "line, formatting may run together, numbering may be inconsistent. Infer "
+        "problem boundaries by meaning, not by line position.\n\n"
+        f"Assignment text:\n{text[:8000]}\n\n"
+        'Respond with ONLY a JSON object: {"problems": [{"label": <string like '
+        '"Q1", in order>, "statement": <string, the full problem text>, '
+        '"points": <number, the stated point value, or 5 if none is stated>, '
+        '"reference_answer": <string or null -- this is an ASSIGNMENT, so usually '
+        "null unless the text itself states an answer>}, ...]}."
+    )
+    raw = call_model_json(prompt, max_tokens=2048)
+    problems = raw.get("problems") if isinstance(raw, dict) else None
+    if not isinstance(problems, list) or not problems:
+        return None
+
+    validated: list[dict] = []
+    for item in problems:
+        if not isinstance(item, dict):
+            continue
+        statement = item.get("statement")
+        if not isinstance(statement, str) or not statement.strip():
+            continue
+        try:
+            points = float(item.get("points", 1.0))
+        except (TypeError, ValueError):
+            continue
+        if points < 0:
+            continue
+        label = item.get("label")
+        label = str(label).strip() or None if label else None
+        reference_answer = item.get("reference_answer")
+        reference_answer = str(reference_answer).strip() or None if reference_answer else None
+        validated.append({
+            "label": label, "statement": statement.strip(), "points": points,
+            "reference_answer": reference_answer,
+        })
+    return validated or None
+
+
+def _build_llm_parsed_assignment(source: str, text: str, assignment_type: str = "math") -> Assignment | None:
+    problems_data = _llm_parse_assignment_problems(text)
+    if not problems_data:
+        return None
+    try:
+        label = Path(source).stem if _source_path(source) else "assignment"
+        title = _sanitize_text(text.splitlines()[0]) if text.splitlines() else label.replace("_", " ").title()
+        assignment = Assignment(label=label, title=title, type=assignment_type)
+        for index, item in enumerate(problems_data, start=1):
+            problem = Problem(
+                assignment_id=assignment.id,
+                label=item["label"] or f"Q{index}",
+                statement=_sanitize_text(item["statement"]),
+                points_possible=item["points"],
+                reference_answer=_sanitize_text(item["reference_answer"]) if item["reference_answer"] else None,
+            )
+            assignment.problems.append(problem)
+        return assignment if assignment.problems else None
+    except Exception:
+        # Never let unstructured/partial model output produce a malformed
+        # Assignment/Problem -- any doubt falls through to the regex parser.
+        return None
+
+
 def _build_parsed_assignment(source: str, text: str, assignment_type: str = "math") -> Assignment | None:
     blocks, saw_heading = _split_problem_blocks(text)
     if not blocks:
@@ -233,13 +317,21 @@ def _build_parsed_assignment(source: str, text: str, assignment_type: str = "mat
     return assignment
 
 
-def _resolve_problem_id(block: str, index: int, assignment: Optional[Assignment]) -> Optional[UUID]:
+def _resolve_problem_id(
+    block: str, index: int, assignment: Optional[Assignment], label: Optional[str] = None,
+) -> Optional[UUID]:
     """Map a parsed submission block to a real problem id when the target
-    assignment is known: match by extracted label first (e.g. a block
-    literally headed 'Problem 2' -> the assignment's 'Q2'), falling back to
-    position when the label doesn't line up. Without an assignment, this
-    just returns a fresh placeholder id -- the caller is responsible for
-    remapping it once it knows which assignment the submission belongs to.
+    assignment is known: match by label first (e.g. a block literally headed
+    'Problem 2' -> the assignment's 'Q2'), falling back to position when the
+    label doesn't line up. Without an assignment, this just returns a fresh
+    placeholder id -- the caller is responsible for remapping it once it
+    knows which assignment the submission belongs to.
+
+    `label`, when given, skips the regex extraction below and is matched
+    directly -- the LLM-based parser already returns a structured label per
+    answer, more reliable than re-deriving one from raw block text a second
+    time. Every existing caller (which doesn't have one) keeps deriving it
+    from `block` exactly as before.
 
     Returns None when the assignment IS known but this block matches none of
     its problems by label and its position also runs past the number of
@@ -252,13 +344,87 @@ def _resolve_problem_id(block: str, index: int, assignment: Optional[Assignment]
     """
     if assignment is None or not assignment.problems:
         return new_id()
-    label = _extract_problem_label(block, index)
+    if label is None:
+        label = _extract_problem_label(block, index)
     for problem in assignment.problems:
         if problem.label == label:
             return problem.id
     if index - 1 < len(assignment.problems):
         return assignment.problems[index - 1].id
     return None
+
+
+def _llm_parse_submission_answers(text: str) -> Optional[list[dict]]:
+    """Ask the model to split raw submission text into per-problem answers,
+    the same "infer boundaries by meaning" approach as
+    `_llm_parse_assignment_problems`. Returns a validated list of answer
+    dicts, or None on any failure/unusable output."""
+    prompt = (
+        "Split this student's submission text into per-problem answers. The text "
+        "may be messy or PDF-extracted -- infer problem boundaries by meaning, not "
+        "by line position.\n\n"
+        f"Submission text:\n{text[:8000]}\n\n"
+        'Respond with ONLY a JSON object: {"answers": [{"label": <string like '
+        '"Q1" identifying which problem this answers, in order>, "work_text": '
+        '<string, the shown work>, "final_answer": <string or null>}, ...]}.'
+    )
+    raw = call_model_json(prompt, max_tokens=2048)
+    answers = raw.get("answers") if isinstance(raw, dict) else None
+    if not isinstance(answers, list) or not answers:
+        return None
+
+    validated: list[dict] = []
+    for item in answers:
+        if not isinstance(item, dict):
+            continue
+        work_text = item.get("work_text")
+        work_text = work_text if isinstance(work_text, str) else ""
+        label = item.get("label")
+        label = str(label).strip() or None if label else None
+        final_answer = item.get("final_answer")
+        final_answer = str(final_answer).strip() or None if final_answer else None
+        if not work_text.strip() and not final_answer:
+            continue
+        validated.append({"label": label, "work_text": work_text, "final_answer": final_answer})
+    return validated or None
+
+
+def _build_llm_parsed_submission(source: str, text: str, assignment: Optional[Assignment] = None) -> Submission | None:
+    answers_data = _llm_parse_submission_answers(text)
+    if not answers_data:
+        return None
+    try:
+        label = Path(source).stem if _source_path(source) else "student"
+        answers: list[SubmissionAnswer] = []
+        for index, item in enumerate(answers_data, start=1):
+            # KEEP the existing label/position mapping logic (_resolve_problem_id)
+            # to attach answers to real problem ids -- only the label's SOURCE
+            # changes (the LLM's structured output, not a regex re-extraction).
+            problem_id = _resolve_problem_id(item["work_text"], index, assignment, label=item["label"])
+            if problem_id is None:
+                if answers:
+                    previous = answers[-1]
+                    previous.work_text = _sanitize_text(f"{previous.work_text} {item['work_text']}")
+                    if previous.final_answer is None and item["final_answer"]:
+                        previous.final_answer = _sanitize_text(item["final_answer"])
+                continue
+            answers.append(SubmissionAnswer(
+                problem_id=problem_id,
+                work_text=_sanitize_text(item["work_text"]),
+                final_answer=_sanitize_text(item["final_answer"]) if item["final_answer"] else None,
+            ))
+        if not answers:
+            return None
+        return Submission(
+            assignment_id=assignment.id if assignment else new_id(),
+            student_label=label,
+            answers=answers,
+            sanitized=True,
+        )
+    except Exception:
+        # Never let unstructured/partial model output produce a malformed
+        # Submission -- any doubt falls through to the existing block parser.
+        return None
 
 
 def _build_parsed_submission(source: str, text: str, assignment: Optional[Assignment] = None) -> Submission | None:
@@ -307,6 +473,10 @@ def ingest_assignment(source: str, assignment_type: str = "math") -> Assignment:
     """
     text = _read_source_text(source)
     if text:
+        if _model_configured():
+            llm_parsed = _build_llm_parsed_assignment(source, text, assignment_type)
+            if llm_parsed is not None:
+                return llm_parsed
         parsed = _build_parsed_assignment(source, text, assignment_type)
         if parsed is not None:
             return parsed
@@ -345,6 +515,10 @@ def ingest_submission(source: str, assignment: Optional[Assignment] = None) -> S
     """
     text = _read_source_text(source)
     if text:
+        if _model_configured():
+            llm_parsed = _build_llm_parsed_submission(source, text, assignment)
+            if llm_parsed is not None:
+                return llm_parsed
         parsed = _build_parsed_submission(source, text, assignment)
         if parsed is not None:
             return parsed

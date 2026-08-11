@@ -77,7 +77,18 @@ def _generate_solution_text(problem: Problem, method_context: Optional[str]) -> 
         f"Problem: {problem.statement}\n"
     )
     if method_context:
-        prompt += f"Ground your method in this course material:\n{method_context}\n"
+        # Grounding, not copy-paste: the retrieved chunk is a coarse
+        # relevance-gated match (lanes/p1_rag.py), not a guaranteed fit for
+        # THIS problem -- an irrelevant chunk must be ignorable, and even a
+        # relevant one must never be quoted verbatim into student-facing
+        # output.
+        prompt += (
+            f"Course material retrieved as reference grounding:\n{method_context}\n"
+            "Use it only if it is actually relevant to solving THIS problem; if it "
+            "is not relevant, ignore it entirely and solve from first principles. "
+            "Never quote or copy this material verbatim -- write the solution in "
+            "your own words.\n"
+        )
     prompt += (
         "\nRespond with ONLY a JSON object: {\"solution\": <string with the worked "
         "solution>, \"final_answer\": <string with ONLY the final answer as a short "
@@ -185,16 +196,16 @@ def _generated_criteria(assignment: Assignment, method_context: dict) -> list[di
             "points": round(possible * 0.5, 4),
         })
 
+        # Grounding, not copy-paste: the offline template has no model to ask
+        # to paraphrase, so it never embeds the retrieved snippet's actual
+        # text at all -- only a generic note that grounding was available.
+        # The old version spliced the raw snippet (capped at 800 chars)
+        # straight into this description, which is exactly the verbatim
+        # copy this criterion (and everything downstream that reads it --
+        # build_context, feedback) must never carry.
         method_description = "A valid method or approach is used to reach the answer."
-        method_snippet = method_context.get(p.id)
-        if method_snippet:
-            # Bake the retrieved course method into the rubric itself (retrieval
-            # happens only here, at rubric-design time — never at grading time).
-            # Capped: build_context sums this into estimated_tokens against
-            # DEFAULT_TOKEN_BUDGET, and multiple criteria/problems each carry
-            # their own snippet -- an uncapped textbook excerpt (a CLRS
-            # section is much larger than algebra.txt) could blow the budget.
-            method_description += f" Method from course material: {method_snippet[:800]}"
+        if method_context.get(p.id):
+            method_description += " Informed by the retrieved course material where relevant."
         generated_criteria.append({
             "problem_id": p.id,
             "name": "Valid method or approach",
@@ -256,6 +267,18 @@ def draft_rubric(assignment: Assignment, method_context: dict) -> Rubric:
     )
     if method_snippets:
         prompt += "\n".join(method_snippets) + "\n"
+        # Grounding, not copy-paste: the retrieved chunk is a coarse
+        # relevance-gated match (lanes/p1_rag.py), not guaranteed to fit
+        # every problem it's handed alongside -- an irrelevant one must be
+        # ignorable, and even a relevant one must never be quoted verbatim
+        # into a criterion a student will eventually read.
+        prompt += (
+            "The course material above is reference grounding only: use it for a "
+            "problem only if it is actually relevant to THAT problem; if it is not "
+            "relevant, ignore it entirely. Never quote or copy this material "
+            "verbatim into a criterion's name or description -- paraphrase in your "
+            "own words if you use it at all.\n"
+        )
     prompt += (
         "For each problem, break the rubric into multiple distinct criteria that "
         "separately assess the different things a grader would actually check -- e.g. "
