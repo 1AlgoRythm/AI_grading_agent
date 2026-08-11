@@ -26,6 +26,7 @@ from typing import Optional
 import streamlit as st
 
 from contracts import ArtifactStatus
+from lanes import active_selection
 from lanes import p1_ingestion as p1
 from lanes import p1_rag
 from lanes import p2_grading as p2
@@ -101,6 +102,20 @@ def _get_p2_store() -> P2Store:
     return st.session_state.p2_store
 
 
+def _set_active_assignment_scope(assignment_id) -> None:
+    """Loading/switching to a different assignment on P1 updates the shared
+    active_assignment_id (contracts §"assignment scope lock" -- no screen
+    may show a submission that doesn't belong to the active assignment). If
+    whatever submission was already active elsewhere (P2/P3) belongs to a
+    DIFFERENT assignment, it's cleared rather than left dangling out of
+    scope; if it already belongs to this one, it's left alone."""
+    _, sub_id, grade, trace, rubric = active_selection.get_active()
+    if grade is not None and grade.assignment_id == assignment_id:
+        active_selection.set_active(assignment_id, sub_id, grade, trace, rubric)
+    else:
+        active_selection.set_active(assignment_id, None, None, None, None)
+
+
 def _init_state() -> None:
     st.session_state.setdefault("assignment", None)
     st.session_state.setdefault("method_context", {})
@@ -118,6 +133,7 @@ def _render_upload(store: P1Store) -> None:
             st.session_state.assignment = options[choice]
             st.session_state.method_context = {}
             st.session_state.rubric = None
+            _set_active_assignment_scope(options[choice].id)
             st.rerun()
 
     uploaded = st.file_uploader("Assignment file (.txt, .md, .ipynb, .pdf)", type=["txt", "md", "ipynb", "pdf"])
@@ -137,6 +153,7 @@ def _render_upload(store: P1Store) -> None:
         st.session_state.assignment = assignment
         st.session_state.method_context = {}
         st.session_state.rubric = None
+        _set_active_assignment_scope(assignment.id)
         store.save_assignment(assignment)
         st.success(f"Ingested '{assignment.label}' with {len(assignment.problems)} problem(s).")
         st.rerun()
@@ -294,6 +311,10 @@ def _render_submission_and_grading(p2_store: P2Store) -> None:
             # Stashed alongside so p2_app/p3_app can pick this up from shared
             # st.session_state with zero DB reads, not just the grade/trace.
             st.session_state.last_grade_rubric = rubric
+            # The shared active selection (lanes/active_selection.py): grading
+            # a submission here is exactly the kind of event that should make
+            # it "the" active submission everywhere, not just on this tab.
+            active_selection.set_active(assignment.id, submission.id, grade, trace, rubric)
             st.success(
                 f"Graded '{submission.student_label}': {grade.total_awarded:g}/{grade.total_possible:g} "
                 f"({grade.fraction:.0%}). Persisted grade {grade.id} for submission {submission.id}."
@@ -315,7 +336,18 @@ def _render_submission_and_grading(p2_store: P2Store) -> None:
     if history:
         st.subheader(f"Previously graded submissions for '{assignment.label}'")
         for g in history:
-            st.write(f"- submission {g.submission_id}: grade {g.id} — {g.total_awarded:g}/{g.total_possible:g}")
+            col1, col2 = st.columns([4, 1])
+            with col1:
+                st.write(f"submission {g.submission_id}: grade {g.id} — {g.total_awarded:g}/{g.total_possible:g}")
+            with col2:
+                # Makes this submission the active one everywhere (P2/P3
+                # follow), not just something you can read about here.
+                if st.button("View", key=f"view-hist-{g.id}"):
+                    reason = active_selection.load_active_from_db(assignment.id, g.submission_id, store, p2_store)
+                    if reason:
+                        st.error(reason)
+                    else:
+                        st.rerun()
 
 
 def render() -> None:

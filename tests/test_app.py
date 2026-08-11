@@ -132,3 +132,59 @@ def test_overriding_a_score_on_the_grade_tab_is_immediately_visible_on_review(tm
 
     at.sidebar.radio[0].set_value("Review & Feedback").run()
     assert "5/5" in at.metric[0].value
+
+
+def test_p2_follows_whichever_submission_p3s_picker_selects(tmp_path, monkeypatch):
+    """lanes/active_selection.py is what makes this work. Before it existed,
+    p2_app.py always followed whichever submission was most recently graded
+    on P1 (last_grade), with no way to follow a *different* submission
+    picked through p3_app.py's own data-source picker -- an instructor
+    could browse to one student's submission in P3, switch to P2 intending
+    to override that same submission, and silently be editing a different
+    student's grade instead, with nothing on screen indicating the two tabs
+    had drifted apart."""
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'app.db'}")
+    from streamlit.testing.v1 import AppTest
+
+    at = AppTest.from_file(APP_PATH)
+    at.run()
+    at.text_area[0].set_value("HW4\n\nProblem A (5 points): Solve for x: 2x + 6 = 10.").run()
+    next(b for b in at.button if b.label == "Ingest assignment").click().run()
+    next(b for b in at.button if b.label.startswith("Develop solution for")).click().run(timeout=30)
+    next(b for b in at.button if b.label == "Approve solution").click().run()
+    next(b for b in at.button if b.label == "Draft rubric").click().run(timeout=30)
+    next(b for b in at.button if b.label == "Approve rubric").click().run()
+
+    def grade_one(final_answer: str) -> None:
+        next(ta for ta in at.text_area if ta.label == "...or paste the submission text directly").set_value(
+            f"Problem A\nFinal answer: {final_answer}"
+        ).run()
+        next(b for b in at.button if b.label == "Ingest & grade submission").click().run()
+
+    grade_one("x = 2")  # student_farid
+    farid_grade_id = at.session_state["last_grade"][1].id
+    grade_one("x = 999")  # student_gita, graded more recently
+    gita_grade_id = at.session_state["last_grade"][1].id
+    assert farid_grade_id != gita_grade_id
+
+    at.sidebar.radio[0].set_value("Grade & Trace").run()
+    assert at.session_state["p2_grade"].id == gita_grade_id  # follows the most recently graded
+
+    # Browse to farid's (older) submission via P3's own picker. Options are
+    # keyed by "Submission <hex tag> -- <score>"; resolve farid's directly
+    # from the store rather than guessing by position/exclusion.
+    p2_store = at.session_state["p2_store"]
+    farid_grade = p2_store.get_grade(farid_grade_id)
+    farid_option = f"Submission {farid_grade.submission_id.hex[-2:]} -- {farid_grade.total_awarded:g}/{farid_grade.total_possible:g}"
+
+    at.sidebar.radio[0].set_value("Review & Feedback").run()
+    assignment_choice = next(o for o in at.sidebar.selectbox[0].options if o != "-- choose --")
+    at.sidebar.selectbox[0].select(assignment_choice).run()
+    assert farid_option in at.sidebar.selectbox[1].options
+    at.sidebar.selectbox[1].select(farid_option).run()
+    next(b for b in at.sidebar.button if b.label == "Load this submission").click().run()
+    assert at.session_state["p3_grade"].id == farid_grade_id
+
+    # P2 must follow P3's pick -- this is the actual bug this change fixes.
+    at.sidebar.radio[0].set_value("Grade & Trace").run()
+    assert at.session_state["p2_grade"].id == farid_grade_id

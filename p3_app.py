@@ -11,6 +11,7 @@ import streamlit as st
 
 import fixtures
 from contracts import ArtifactStatus, ProblemOutcome, problem_label_map
+from lanes import active_selection
 from lanes.p1_storage import P1Store
 from lanes.p2_storage import P2Store
 from lanes.p3_evaluation import evaluate_runs
@@ -39,9 +40,23 @@ def _get_stores() -> tuple[P1Store, P2Store, P3Store]:
 
 def _load(grade, rubric, trace, assignment_id) -> None:
     # Route through the shared cache: this is the only place p3_app.py picks
-    # up a grade (whether from last_grade, the DB picker below, or the demo
-    # fixtures), so this one call covers every entry point.
+    # up a grade (whether from active_selection, the DB picker below, or the
+    # demo fixtures), so this one call covers every entry point.
     grade = shared_grade(grade)
+    # The demo-fixtures path passes assignment_id=None -- there's no real DB
+    # row behind it, so the active selection's submission_id must be None
+    # too, not the fixture's own submission id (which would otherwise look
+    # like a real, loadable submission to the assignment-scope lock).
+    submission_id = grade.submission_id if assignment_id is not None else None
+    active_selection.set_active(assignment_id, submission_id, grade, trace, rubric)
+    st.session_state.p3_grade = grade
+    st.session_state.p3_rubric = rubric
+    st.session_state.p3_trace = trace
+    st.session_state.p3_assignment_id = assignment_id
+
+
+def _mirror_active_into_p3_state() -> None:
+    assignment_id, _, grade, trace, rubric = active_selection.get_active()
     st.session_state.p3_grade = grade
     st.session_state.p3_rubric = rubric
     st.session_state.p3_trace = trace
@@ -73,12 +88,13 @@ def _render_data_source_picker() -> None:
                 grade_choice = st.sidebar.selectbox("Graded submission", list(grade_options.keys()))
                 if st.sidebar.button("Load this submission"):
                     grade = grade_options[grade_choice]
-                    rubric = p1_store.load_rubric_for_assignment(assignment.id)
-                    trace = p2_store.get_trace(grade.id)
-                    if rubric is None or trace is None:
-                        st.sidebar.error("Missing rubric or trace for this grade -- check the P1/P2 data.")
+                    reason = active_selection.load_active_from_db(
+                        assignment.id, grade.submission_id, p1_store, p2_store,
+                    )
+                    if reason:
+                        st.sidebar.error(reason)
                     else:
-                        _load(grade, rubric, trace, assignment.id)
+                        _mirror_active_into_p3_state()
                         st.rerun()
 
     if st.sidebar.button("Load demo fixtures instead"):
@@ -88,13 +104,26 @@ def _render_data_source_picker() -> None:
 
 def _initialize_demo() -> None:
     _get_stores()
+
+    # active_selection is the single source of truth: re-sync from it on
+    # every render (not just the first) so a *new* active selection --
+    # graded fresh on P1, or a different submission picked via the data
+    # source picker below -- shows up here immediately, even if this tab
+    # was already open with something else loaded.
+    _, _, active_grade, _, _ = active_selection.get_active()
+    if active_grade is not None:
+        if st.session_state.get("p3_grade") is None or st.session_state.p3_grade.id != active_grade.id:
+            _mirror_active_into_p3_state()
+        return
+
     if "p3_grade" in st.session_state:
         return
 
-    # First load this session, nothing explicitly picked yet -- prefer a
-    # grade already produced on the P1 tab (shared st.session_state, and
-    # p1_app stashes the rubric alongside it, so this needs zero DB reads)
-    # over a fresh fixture run.
+    # Nothing active anywhere yet -- prefer a grade already produced on the
+    # P1 tab (shared st.session_state, and p1_app stashes the rubric
+    # alongside it, so this needs zero DB reads) over a fresh fixture run.
+    # In the normal flow P1 already writes directly into active_selection
+    # at grading time, so this is mostly a defensive fallback.
     last = st.session_state.get("last_grade")
     rubric = st.session_state.get("last_grade_rubric")
     if last is not None and rubric is not None:
@@ -155,13 +184,23 @@ def render() -> None:
             type="primary",
             disabled=grade.status is ArtifactStatus.APPROVED,
         ):
+            active_assignment_id, active_submission_id, _, _, active_rubric = active_selection.get_active()
             try:
-                finalize(grade, st.session_state.approver_id)
+                finalize(grade, st.session_state.approver_id, expected_submission_id=active_submission_id)
             except ValueError as exc:
-                st.error(str(exc))
+                if str(exc).startswith("refusing to approve"):
+                    st.error(
+                        "This action was blocked because the screen and the grade were out of "
+                        "sync — reload the submission and try again."
+                    )
+                else:
+                    st.error(str(exc))
             else:
                 _, p2_store, _ = _get_stores()
                 p2_store.save(grade, st.session_state.p3_trace)
+                active_selection.set_active(
+                    active_assignment_id, active_submission_id, grade, st.session_state.p3_trace, active_rubric,
+                )
                 st.success("Grade approved and re-persisted.")
                 st.rerun()
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Protocol
+from typing import Optional, Protocol
 from uuid import UUID, uuid4
 
 from contracts import ArtifactStatus, Grade, GradeResolution, ProblemOutcome, now, round_to_step
@@ -47,8 +47,19 @@ def override_problem_score(
     approver_id: str,
     reason: str,
     audit_log: AuditLog,
+    expected_submission_id: Optional[UUID] = None,
 ) -> Grade:
-    """Apply a justified human override and record before/after values."""
+    """Apply a justified human override and record before/after values.
+
+    `expected_submission_id`, when given, must match `grade.submission_id`
+    or this refuses before touching anything -- a hard guard against a UI
+    write landing on the wrong student's grade if the active-selection sync
+    ever drifts. Optional and None by default so every existing caller
+    (tests, and any future direct lane usage) is unaffected; the UI passes
+    its active selection at every real call site.
+    """
+    if expected_submission_id is not None and grade.submission_id != expected_submission_id:
+        raise ValueError("refusing to override: this grade does not belong to the active submission")
     approver_id, reason = approver_id.strip(), reason.strip()
     if not approver_id:
         raise ValueError("approver_id is required")
@@ -129,8 +140,14 @@ def override_problem_score(
     return grade
 
 
-def finalize(grade: Grade, approver_id: str) -> Grade:
-    """Approve a reviewed grade while preserving override provenance."""
+def finalize(grade: Grade, approver_id: str, expected_submission_id: Optional[UUID] = None) -> Grade:
+    """Approve a reviewed grade while preserving override provenance.
+
+    See `override_problem_score` for what `expected_submission_id` guards
+    against and why it's optional and None by default.
+    """
+    if expected_submission_id is not None and grade.submission_id != expected_submission_id:
+        raise ValueError("refusing to approve: this grade does not belong to the active submission")
     approver_id = approver_id.strip()
     if not approver_id:
         raise ValueError("approver_id is required")

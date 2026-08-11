@@ -1,5 +1,7 @@
 """Tests for P3 feedback, review/audit, and evaluation behavior."""
 
+from uuid import uuid4
+
 import pytest
 
 import fixtures as f
@@ -238,3 +240,61 @@ def test_database_store_persists_audits_and_evaluations(tmp_path):
     run_id = store.save_evaluation(report, now())
     assert run_id == 1
     assert store.evaluation_runs() == [report]
+
+
+def test_override_is_refused_when_the_grade_belongs_to_a_different_submission():
+    # The write-time guard (lanes/active_selection.py is the UI-side half):
+    # even if the active-selection sync ever drifts and the UI hands this
+    # function a grade that isn't the one currently on screen, the write
+    # must be refused outright rather than silently landing on the wrong
+    # student's grade. No partial mutation, no audit entry -- a clean
+    # refusal before anything is touched.
+    grade, audit = f.sample_grade(), InMemoryAuditLog()
+    problem_grade_before = next(pg for pg in grade.problem_grades if pg.problem_id == f.Q2).model_copy()
+    wrong_submission_id = uuid4()
+    assert wrong_submission_id != grade.submission_id
+
+    with pytest.raises(ValueError, match="refusing to override"):
+        override_problem_score(
+            grade, f.Q2, 5, "instructor_1", "should never be applied", audit,
+            expected_submission_id=wrong_submission_id,
+        )
+
+    problem_grade_after = next(pg for pg in grade.problem_grades if pg.problem_id == f.Q2)
+    assert problem_grade_after == problem_grade_before
+    assert audit.for_grade(grade.id) == []
+
+    # The correct submission id is the escape hatch, not a permanent lock:
+    # the same call succeeds once the caller passes the grade's own id.
+    override_problem_score(
+        grade, f.Q2, 5, "instructor_1", "correct submission now", audit,
+        expected_submission_id=grade.submission_id,
+    )
+    assert grade.problem_grades[1].points_awarded == 5
+
+
+def test_finalize_is_refused_when_the_grade_belongs_to_a_different_submission():
+    grade = f.sample_grade()
+    grade.escalated = False
+    wrong_submission_id = uuid4()
+    assert wrong_submission_id != grade.submission_id
+
+    with pytest.raises(ValueError, match="refusing to approve"):
+        finalize(grade, "instructor_1", expected_submission_id=wrong_submission_id)
+    assert grade.status is not ArtifactStatus.APPROVED
+    assert grade.approver_id is None
+
+    finalize(grade, "instructor_1", expected_submission_id=grade.submission_id)
+    assert grade.status is ArtifactStatus.APPROVED
+
+
+def test_override_and_finalize_guards_default_to_not_checking_anything():
+    # expected_submission_id defaults to None -- every existing caller
+    # (every other test in this file, and every current UI call site that
+    # predates this guard) must keep working with zero behavior change.
+    grade, audit = f.sample_grade(), InMemoryAuditLog()
+    override_problem_score(grade, f.Q2, 5, "instructor_1", "no guard passed", audit)
+    assert grade.problem_grades[1].points_awarded == 5
+    grade.escalated = False
+    finalize(grade, "instructor_1")
+    assert grade.status is ArtifactStatus.APPROVED
