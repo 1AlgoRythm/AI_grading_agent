@@ -90,6 +90,16 @@ async def _grade_one(
                 # SymPy crash on the same input will crash the same way
                 # again, so retrying would just burn the batch's time budget.
                 return BatchResult(submission_id=submission.id, grade=None, trace=None, error=str(exc))
+            except Exception as exc:
+                # Contracts.py decision 8's own guarantee is "per-submission
+                # isolation," not "isolation from the two error types we
+                # happened to enumerate." A data-shape bug this submission's
+                # content triggers (e.g. a pydantic ValidationError from an
+                # unusual points_possible) isn't a ModelError or GradingError,
+                # but letting it propagate out of asyncio.gather() still took
+                # down every other submission in the batch, exactly what this
+                # boundary exists to prevent.
+                return BatchResult(submission_id=submission.id, grade=None, trace=None, error=str(exc))
 
             if max_total_tokens is not None:
                 async with spend_lock:

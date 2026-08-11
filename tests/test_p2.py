@@ -8,7 +8,7 @@ import pytest
 
 from lanes import p1_context
 from lanes import p2_grading as p2
-from contracts import GradingContext, ModelError, ProblemOutcome, StopReason, rough_token_estimate
+from contracts import GradingContext, ModelError, ProblemOutcome, StepKind, StopReason, rough_token_estimate
 import fixtures as f
 
 
@@ -121,6 +121,34 @@ def test_p2_unresolved_disagreement_escalates():
     assert trace.stop_reason is StopReason.ESCALATED
     assert trace.num_revisions == 1
     assert "Escalated" in q2.evidence
+
+
+def test_p2_revision_logs_a_reason_step_matching_the_final_awarded_points():
+    # Regression: after a revision, the trace's only REASON step showed the
+    # PRE-revision grader output -- a reviewer inspecting the trace saw a
+    # points_awarded that disagreed with what the final ProblemGrade
+    # actually stored, with no step explaining the revised number at all.
+    submission = f.sample_submission()
+    submission.answers[1].work_text = (
+        "I tried to expand this using algebra but got confused about the steps."
+    )
+    submission.answers[1].final_answer = "0"
+    rubric = f.sample_rubric()
+    context = f.sample_submission_context()
+    context.problem_contexts[1] = _bare_context(f.Q2, submission.answers[1].work_text, "0")
+
+    grade, trace = p2.grade(submission, rubric, context)
+
+    q2 = next(pg for pg in grade.problem_grades if pg.problem_id == f.Q2)
+    assert trace.num_revisions == 1  # sanity: this scenario does revise
+
+    reason_steps = [
+        s for s in trace.steps
+        if s.type == StepKind.REASON and s.data.get("problem_id") == str(f.Q2)
+    ]
+    assert len(reason_steps) == 2
+    assert reason_steps[1].data.get("after_revision") is True
+    assert reason_steps[1].data["points_awarded"] == q2.points_awarded
 
 
 def test_p2_batch_grades_concurrently_and_orders_the_review_queue():
@@ -240,6 +268,36 @@ def test_p2_batch_gives_up_after_max_retries_and_isolates_the_failure():
 
     assert results[0].grade is None
     assert "provider is down" in results[0].error
+
+
+def test_p2_batch_isolates_an_unexpected_exception_not_just_the_two_known_types():
+    # Regression: a pydantic ValidationError (e.g. from a data-shape bug like
+    # the points_possible-rounding one fixed elsewhere) is neither a
+    # ModelError nor a GradingError. It used to propagate straight out of
+    # asyncio.gather() and abort the WHOLE batch, breaking decision 8's
+    # documented per-submission isolation guarantee for every other,
+    # perfectly good submission alongside it.
+    def good(submission, rubric, context):
+        return p2.grade_submission(submission, rubric, context)
+
+    def bad(submission, rubric, context):
+        raise ValueError("something this one submission's data triggered")
+
+    good_sub, bad_sub = f.sample_submission(), f.sample_submission().model_copy(deep=True)
+
+    def grade_fn(submission, rubric, context):
+        return (good if submission is good_sub else bad)(submission, rubric, context)
+
+    results = p2.grade_batch(
+        [good_sub, bad_sub],
+        f.sample_rubric(),
+        [f.sample_submission_context(), f.sample_submission_context()],
+        grade_fn=grade_fn,
+    )
+
+    assert results[0].grade is not None
+    assert results[1].grade is None
+    assert "something this one submission's data triggered" in results[1].error
 
 
 def test_p2_batch_does_not_retry_non_model_grading_errors():

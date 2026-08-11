@@ -24,6 +24,7 @@ class OverrideAuditEntry:
 
 class AuditLog(Protocol):
     def append(self, entry: OverrideAuditEntry) -> None: ...
+    def for_grade(self, grade_id: UUID) -> list[OverrideAuditEntry]: ...
 
 
 class InMemoryAuditLog:
@@ -61,9 +62,16 @@ def override_problem_score(
     )
     if problem_grade is None:
         raise KeyError(f"problem {problem_id} is not present in grade {grade.id}")
-    adjusted = round_to_step(points_awarded)
-    if adjusted < 0 or adjusted > problem_grade.points_possible:
+    # Check the raw input against the true range first -- a genuine mistake
+    # (e.g. entering 50 for a 4.3-point problem) should reject clearly.
+    # Rounding BEFORE this check (and comparing to points_possible
+    # unrounded) used to reject entering the exact max value for a problem
+    # whose points_possible isn't itself a multiple of the rounding step
+    # (e.g. 4.3 rounds to 4.5, which then fails ">  4.3"), so legitimate
+    # full-credit overrides on such problems always errored out.
+    if points_awarded < 0 or points_awarded > problem_grade.points_possible:
         raise ValueError("override score must be within the problem point range")
+    adjusted = min(round_to_step(points_awarded), problem_grade.points_possible)
 
     previous = problem_grade.points_awarded
     # The human's decision has two homes: `partial_credit_reason` (below) and
@@ -97,8 +105,22 @@ def override_problem_score(
     # finalize() refuses an escalated grade -- and nothing ever cleared the
     # flag, so an escalated grade was a permanent dead end with no path to
     # approval. The human judgment the escalation was asking for has now
-    # been made.
-    grade.escalated = False
+    # been made for THIS problem specifically -- recompute from problems
+    # that have never been overridden rather than unconditionally clearing
+    # the whole submission's flag, so a second, untouched disagreement
+    # elsewhere in the same grade doesn't get silently waved through just
+    # because one problem was overridden. The audit log (not
+    # `critic_agreement`, which is left alone as the critic's own historical
+    # verdict, still meaningful in the trace and batch-level agreement
+    # metrics) is the durable record of which problems a human has already
+    # reviewed -- checked here, not just the one problem this call touched,
+    # so overriding problem A and then B in two separate calls correctly
+    # resolves the escalation once both are done, not just the second one.
+    reviewed_ids = {problem_id} | {entry.problem_id for entry in audit_log.for_grade(grade.id)}
+    grade.escalated = any(
+        pg.critic_agreement is False and pg.problem_id not in reviewed_ids
+        for pg in grade.problem_grades
+    )
     audit_log.append(OverrideAuditEntry(
         id=uuid4(), grade_id=grade.id, problem_id=problem_id,
         approver_id=approver_id, previous_points=previous, new_points=adjusted,

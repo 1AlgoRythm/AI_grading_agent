@@ -47,6 +47,14 @@ def _feedback_for_problem(problem_grade: ProblemGrade) -> str:
         result = "Full credit."
     else:
         reason = _clean(problem_grade.partial_credit_reason)
+        if reason.startswith("Placeholder score:"):
+            # p2_grader.py's offline fallback for answer types with no
+            # objective check writes this when no real judgment was made
+            # (no BYOK model configured, or its response didn't parse) --
+            # useful for a reviewer deciding whether to trust the score, but
+            # "no BYOK model is configured" is internal-process language
+            # that has no business in student-facing feedback.
+            reason = "This response could not be automatically evaluated in detail and will be reviewed by a human."
         result = f"Partial credit. {reason}" if reason else "Partial credit."
 
     evidence = _clean(problem_grade.evidence)

@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import json
 import time
+import warnings
 from typing import Callable, Optional, TypeVar
 
 from dotenv import load_dotenv
@@ -108,9 +109,18 @@ def call_model(
                     temperature=temperature,
                 ))
             return resp.choices[0].message.content or ""
-        except Exception:
-            # Fall through to stub on any failure.
-            pass
+        except Exception as exc:
+            # Falling through to the stub silently used to make a
+            # completely broken BYOK config (bad/expired key, wrong model
+            # name, network outage) indistinguishable from "everything is
+            # fine" -- every grade would quietly be produced by the
+            # deterministic offline stub instead of the real model an
+            # instructor configured, with zero indication anything failed.
+            warnings.warn(
+                f"OpenAI call failed ({exc}); falling back to the deterministic "
+                "offline stub for this call. If this persists, check "
+                "MODEL_API_KEY/MODEL_NAME.", RuntimeWarning, stacklevel=2,
+            )
     elif provider == "anthropic" and key:
         try:
             import anthropic
@@ -123,8 +133,12 @@ def call_model(
                 messages=[{"role": "user", "content": prompt}],
             ))
             return "".join(block.text for block in resp.content if getattr(block, "type", None) == "text")
-        except Exception:
-            pass
+        except Exception as exc:
+            warnings.warn(
+                f"Anthropic call failed ({exc}); falling back to the deterministic "
+                "offline stub for this call. If this persists, check "
+                "MODEL_API_KEY/MODEL_NAME.", RuntimeWarning, stacklevel=2,
+            )
     elif provider in ("gemini", "google") and key:
         try:
             from google import genai
@@ -165,8 +179,25 @@ def call_model(
                     config=types.GenerateContentConfig(**base_config),
                 ))
             return resp.text or ""
-        except Exception:
-            pass
+        except Exception as exc:
+            warnings.warn(
+                f"Gemini call failed ({exc}); falling back to the deterministic "
+                "offline stub for this call. If this persists, check "
+                "MODEL_API_KEY/MODEL_NAME.", RuntimeWarning, stacklevel=2,
+            )
+    elif provider and key:
+        # A provider AND key are both configured, but the provider string
+        # didn't match any known branch (typo, wrong case, unsupported
+        # value). app.py's own "no BYOK configured" warning only fires when
+        # the env vars are unset, not when they're set to something wrong --
+        # without this, a misspelled MODEL_PROVIDER silently grades
+        # everything with the offline stub forever, indistinguishable from
+        # a real, working configuration.
+        warnings.warn(
+            f"MODEL_PROVIDER={provider!r} is not a recognized provider (expected "
+            "'openai', 'anthropic', 'gemini', or 'google'); falling back to the "
+            "deterministic offline stub.", RuntimeWarning, stacklevel=2,
+        )
     # Deterministic fallback for offline/test runs
     return _stub_response(prompt, max_tokens)
 

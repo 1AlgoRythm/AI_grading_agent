@@ -120,6 +120,19 @@ def _grade_one_problem(
             }))
             result = run_grader(ctx, matched, critique=critique.critique)
             revisions = 1
+            # The final ProblemGrade below uses this revised `result`, not
+            # the one already logged above -- without a second REASON step,
+            # the trace's only "reason" entry showed the pre-revision
+            # points_awarded/rationale, silently disagreeing with what was
+            # actually awarded (and with no step explaining the revised
+            # number at all).
+            steps.append(Step(type=StepKind.REASON, data={
+                "problem": tag,
+                "problem_id": str(problem_id),
+                "points_awarded": result.points_awarded,
+                "rationale": result.rationale,
+                "after_revision": True,
+            }))
             recheck = run_critic(ctx, result)
             steps.append(Step(type=StepKind.CRITIQUE, data={
                 "problem": tag,
@@ -161,7 +174,19 @@ def grade_submission(
 
     for ans in submission.answers:
         ctx = context.context_for(ans.problem_id)
-        possible = ctx.points_possible if ctx else 0.0
+        if ctx is not None:
+            possible = ctx.points_possible
+        else:
+            # No GradingContext for this problem (a caller-assembled
+            # SubmissionContext missing an entry) -- `rubric` was already a
+            # parameter here but unused, so this fell back to a hardcoded
+            # 0.0 for `points_possible`. That silently drops the problem's
+            # real point value from Grade.total_possible instead of just
+            # its award, which INFLATES `Grade.fraction` (a whole ungraded
+            # problem reads as if it never existed, rather than counting
+            # against the student). The rubric's own criteria total is the
+            # only real point value still available here.
+            possible = sum(c.points for c in rubric.for_problem(ans.problem_id))
         final = (ans.final_answer or "").strip()
 
         problem_grade, revisions = _grade_one_problem(

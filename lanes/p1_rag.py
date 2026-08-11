@@ -212,25 +212,33 @@ def retrieve_method_from_textbook(problem_statement: str) -> Optional[str]:
             pass
 
     for path, content in sources:
-        content_lower = content.lower()
-        content_words = _significant_words(content_lower)
-        overlap = stmt_words & content_words
-        score = len(overlap)
-        if not score:
-            continue
+        # Score against the whole file (so a relevant file with the match
+        # buried past the first 400 characters still wins), but return the
+        # actual matching CHUNK, not always the file's opening bytes -- the
+        # returned snippet used to be `content.strip()[:400]` regardless of
+        # where the overlapping words occurred, so a multi-section file
+        # (e.g. an unrelated intro followed by the actually-relevant
+        # chapter) always handed back the unrelated intro.
+        for chunk in _chunk_text(content):
+            chunk_lower = chunk.lower()
+            overlap = stmt_words & _significant_words(chunk_lower)
+            score = len(overlap)
+            if not score:
+                continue
 
-        # Light heading bias: if the statement shares a word with a heading,
-        # reward the match a bit so concise chapter notes rank higher.
-        heading_bonus = 0
-        for line in content_lower.splitlines()[:10]:
-            if line.startswith("#") or len(line) < 80:
-                if _tokenize(line) & stmt_words:
-                    heading_bonus += 1
-        score += heading_bonus
+            # Light heading bias: if the statement shares a word with a
+            # heading-like line near the top of this chunk, reward the
+            # match a bit so concise chapter notes rank higher.
+            heading_bonus = 0
+            for line in chunk_lower.splitlines()[:10]:
+                if line.startswith("#") or len(line) < 80:
+                    if _tokenize(line) & stmt_words:
+                        heading_bonus += 1
+            score += heading_bonus
 
-        if score > best_score:
-            best_score = score
-            best_snippet = content.strip()[:400]
+            if score > best_score:
+                best_score = score
+                best_snippet = chunk.strip()[:400]
 
     return best_snippet if best_score > 0 else None
 

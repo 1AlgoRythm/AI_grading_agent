@@ -15,7 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
-from contracts import GradingContext, RubricCriterion, round_to_step
+from contracts import GradingContext, RubricCriterion, round_award, round_to_step
 from model_provider import call_model_json
 
 __all__ = ["GraderResult", "run_grader", "format_rubric_criteria"]
@@ -102,7 +102,13 @@ def _parse_response(raw: object, points_possible: float) -> Optional[GraderResul
         return None
     rationale = str(raw.get("rationale") or "").strip()
     return GraderResult(
-        points_awarded=round_to_step(points),
+        # round_award (not bare round_to_step): points was just clamped to
+        # points_possible above, and points_possible isn't guaranteed to be
+        # a multiple of the rounding step -- rounding a legitimate 4.3 up to
+        # 4.5 here used to make this GraderResult (and the trace REASON step
+        # logged straight from it) disagree with what ProblemGrade's own
+        # validator would end up storing.
+        points_awarded=round_award(points, points_possible),
         evidence=evidence,
         partial_credit_reason=reason,
         rationale=rationale or "Model-provided grade.",

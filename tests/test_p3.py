@@ -25,6 +25,24 @@ def test_feedback_is_grounded_in_score_and_evidence_not_the_rubric_text():
     assert "dropped the middle cross term" in feedback[f.Q2]
 
 
+def test_feedback_never_leaks_the_no_objective_check_placeholder_note():
+    # p2_grader.py's offline fallback for answer types with no objective
+    # check (proof/short_answer) writes a partial_credit_reason that
+    # literally says "no BYOK model is configured" and "Requires human
+    # review" -- useful for a reviewer, but internal-process language that
+    # must never reach the student-facing feedback panel verbatim.
+    grade = f.sample_grade()
+    grade.problem_grades[1].partial_credit_reason = (
+        "Placeholder score: this problem type has no objective check and no BYOK "
+        "model is configured, so no substantive judgment of the reasoning was made. "
+        "Requires human review."
+    )
+    feedback = generate_feedback(grade, f.sample_rubric())
+    assert "BYOK" not in feedback[f.Q2]
+    assert "Placeholder score" not in feedback[f.Q2]
+    assert "Requires human review" not in feedback[f.Q2]
+
+
 def test_feedback_never_leaks_the_escalation_routing_note():
     # p2_engine.py appends "Escalated to human review after unresolved
     # critic disagreement." to `evidence` purely as an internal routing
@@ -144,6 +162,31 @@ def test_overriding_an_escalated_grade_resolves_it_and_finalize_then_succeeds():
     override_problem_score(grade, f.Q2, 3.5, "instructor_1", "Resolved on manual review", InMemoryAuditLog())
 
     assert grade.escalated is False
+    finalize(grade, "instructor_1")
+    assert grade.status is ArtifactStatus.APPROVED
+
+
+def test_overriding_one_problem_does_not_resolve_a_different_problems_escalation():
+    # Regression: override_problem_score used to clear grade.escalated
+    # unconditionally, even when a SECOND problem in the same grade was also
+    # escalated (critic_agreement=False) and never touched -- finalize()
+    # would then approve a grade with a real, unresolved critic
+    # disagreement still baked into it.
+    grade = f.sample_grade()
+    grade.escalated = True
+    grade.problem_grades[0].critic_agreement = False  # Q1: untouched
+    grade.problem_grades[1].critic_agreement = False  # Q2: about to be overridden
+    audit = InMemoryAuditLog()  # one shared log, as a real caller would use
+
+    override_problem_score(grade, f.Q2, 3.5, "instructor_1", "Resolved Q2 on manual review", audit)
+
+    assert grade.escalated is True  # Q1's disagreement is still unresolved
+    with pytest.raises(ValueError, match="escalated"):
+        finalize(grade, "instructor_1")
+
+    override_problem_score(grade, f.Q1, 5, "instructor_1", "Resolved Q1 on manual review", audit)
+
+    assert grade.escalated is False  # now both are resolved
     finalize(grade, "instructor_1")
     assert grade.status is ArtifactStatus.APPROVED
 

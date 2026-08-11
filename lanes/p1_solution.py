@@ -51,7 +51,15 @@ def classify_problem_type(problem_statement: str) -> ProblemTypeClassification:
     if isinstance(raw, dict) and raw.get("type"):
         type_name = str(raw["type"]).strip().lower()
         if type_name:
-            return ProblemTypeClassification(type=type_name, confident=bool(raw.get("confident", True)))
+            if not bool(raw.get("confident", True)):
+                # A parseable-but-unconfident response used to keep the
+                # model's proposed type verbatim (e.g. type="math",
+                # confident=False), which still routed to the SymPy
+                # objective verifier as if confidently typed -- exactly the
+                # "confidently incorrect verdict" this docstring promises
+                # never happens on low confidence.
+                return ProblemTypeClassification(type="short_answer", confident=False)
+            return ProblemTypeClassification(type=type_name, confident=True)
     return ProblemTypeClassification(type="short_answer", confident=False)
 
 
@@ -156,6 +164,34 @@ def develop_solution(
     return problem
 
 
+def _generated_criteria(assignment: Assignment, method_context: dict) -> list[dict]:
+    generated_criteria = []
+    for p in assignment.problems:
+        generated_criteria.append({
+            "problem_id": p.id,
+            "name": "Correct final answer",
+            "description": "Final answer matches the approved reference.",
+            "points": p.points_possible,
+        })
+        method_description = "Key steps of a valid method are shown; small arithmetic slips tolerated."
+        method_snippet = method_context.get(p.id)
+        if method_snippet:
+            # Bake the retrieved course method into the rubric itself (retrieval
+            # happens only here, at rubric-design time — never at grading time).
+            # Capped: build_context sums this into estimated_tokens against
+            # DEFAULT_TOKEN_BUDGET, and multiple criteria/problems each carry
+            # their own snippet -- an uncapped textbook excerpt (a CLRS
+            # section is much larger than algebra.txt) could blow the budget.
+            method_description += f" Method from course material: {method_snippet[:800]}"
+        generated_criteria.append({
+            "problem_id": p.id,
+            "name": "Method / shown work",
+            "description": method_description,
+            "points": max(0.5, p.points_possible * 0.5),
+        })
+    return generated_criteria
+
+
 def draft_rubric(assignment: Assignment, method_context: dict) -> Rubric:
     r = fixtures.sample_rubric()
     # sample_rubric() carries the *fixture's* own id and assignment_id --
@@ -166,14 +202,34 @@ def draft_rubric(assignment: Assignment, method_context: dict) -> Rubric:
     # rubric silently overwrote the first one's row and wiped its criteria.
     r.id = new_id()
     r.assignment_id = assignment.id
+
+    # The model has no way to know the real problem UUIDs unless we hand
+    # them over -- give it each one to echo back verbatim. Every criterion
+    # it returns still gets validated against this map below (never trusted
+    # blind): a model that invents/paraphrases a problem_id instead of
+    # copying it used to reach `Rubric.criteria = criteria` unchanged, and
+    # Pydantic's required `problem_id: UUID` field raised uncaught the
+    # instant any criterion lacked a real one -- which is every criterion,
+    # since nothing ever told the model what a real id even looks like.
+    problems_by_id = {str(p.id): p.id for p in assignment.problems}
+    problem_lines = [f'- problem_id "{p.id}" ({p.label}): {p.statement}' for p in assignment.problems]
     method_snippets = []
     for pid, snippet in method_context.items():
         if snippet:
             method_snippets.append(f"Problem {pid.hex[-2:]} method: {snippet}")
 
-    prompt = f"Draft a lenient per-problem rubric. Assignment: {assignment.label}\n"
+    prompt = (
+        f"Draft a lenient per-problem rubric. Assignment: {assignment.label}\n"
+        + "\n".join(problem_lines) + "\n"
+    )
     if method_snippets:
         prompt += "\n".join(method_snippets) + "\n"
+    prompt += (
+        "For each criterion, set \"problem_id\" to EXACTLY one of the problem_id "
+        "strings given above (copy it verbatim) -- never invent a new one.\n"
+        "Respond with ONLY a JSON object: {\"criteria\": [{\"problem_id\": <string>, "
+        "\"name\": <string>, \"description\": <string>, \"points\": <number>}, ...]}."
+    )
     raw = call_model_json(prompt, max_tokens=1024)
     criteria = None
     if isinstance(raw, dict) and "criteria" in raw:
@@ -190,40 +246,17 @@ def draft_rubric(assignment: Assignment, method_context: dict) -> Rubric:
             except Exception:
                 criteria = None
 
-    if not criteria:
-        generated_criteria = []
-        for p in assignment.problems:
-            generated_criteria.append({
-                "problem_id": p.id,
-                "name": "Correct final answer",
-                "description": "Final answer matches the approved reference.",
-                "points": p.points_possible,
-            })
-            method_description = "Key steps of a valid method are shown; small arithmetic slips tolerated."
-            method_snippet = method_context.get(p.id)
-            if method_snippet:
-                # Bake the retrieved course method into the rubric itself (retrieval
-                # happens only here, at rubric-design time — never at grading time).
-                # Capped: build_context sums this into estimated_tokens against
-                # DEFAULT_TOKEN_BUDGET, and multiple criteria/problems each carry
-                # their own snippet -- an uncapped textbook excerpt (a CLRS
-                # section is much larger than algebra.txt) could blow the budget.
-                method_description += f" Method from course material: {method_snippet[:800]}"
-            generated_criteria.append({
-                "problem_id": p.id,
-                "name": "Method / shown work",
-                "description": method_description,
-                "points": max(0.5, p.points_possible * 0.5),
-            })
-        try:
-            r.criteria = generated_criteria
-        except Exception:
-            pass
-    else:
-        try:
-            r.criteria = criteria
-        except Exception:
-            r.criteria = criteria
+    valid_criteria = []
+    if isinstance(criteria, list):
+        for item in criteria:
+            if not isinstance(item, dict):
+                continue
+            real_id = problems_by_id.get(str(item.get("problem_id")))
+            if real_id is None:
+                continue
+            valid_criteria.append({**item, "problem_id": real_id})
+
+    r.criteria = valid_criteria or _generated_criteria(assignment, method_context)
     r.status = ArtifactStatus.PROPOSED
     return r
 

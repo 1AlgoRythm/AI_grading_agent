@@ -223,6 +223,33 @@ def test_retrieve_method_returns_multiple_sources_with_labels(tmp_path, monkeypa
     assert "[algebra.txt]" not in snippet
 
 
+def test_deterministic_fallback_returns_the_matching_chunk_not_the_files_opening_text(tmp_path, monkeypatch):
+    # Regression: the non-Chroma fallback scorer used to score a whole file
+    # for relevance but always return `content[:400]` regardless of where
+    # the match actually was -- an unrelated opening section would always
+    # win over the real, relevant content buried later in a longer file.
+    monkeypatch.chdir(tmp_path)
+    textbook = tmp_path / "textbook"
+    textbook.mkdir()
+    unrelated_intro = "A brief history of mathematical notation. " * 30
+    # Padding shares no vocabulary with either the intro or the relevant
+    # section, and is long enough that the chunk containing the relevant
+    # section (near the very end) never also spans back into the intro --
+    # otherwise the fix would trivially "pass" only because one chunk still
+    # happened to contain both.
+    padding = "Unrelated filler content with no shared vocabulary whatsoever. " * 20
+    relevant_section = "To expand squares, use (a+b)^2 = a^2 + 2ab + b^2."
+    (textbook / "combined.txt").write_text(f"{unrelated_intro}\n\n{padding}\n\n{relevant_section}", encoding="utf8")
+
+    monkeypatch.setattr(p1_rag, "_index_textbook_with_chroma", lambda: (None, p1_rag._list_textbook_sources()))
+
+    snippet = p1_rag.retrieve_method_from_textbook("How do I expand (a+b)^2?")
+
+    assert snippet is not None
+    assert "expand squares" in snippet.lower()
+    assert "history of mathematical notation" not in snippet.lower()
+
+
 def test_textbook_index_is_cached_across_calls(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     p1_rag._INDEX_CACHE.clear()

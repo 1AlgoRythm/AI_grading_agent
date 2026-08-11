@@ -67,6 +67,22 @@ def test_award_cannot_exceed_possible():
         c.ProblemGrade(problem_id=f.Q1, points_awarded=6, points_possible=5, evidence="x")
 
 
+def test_full_credit_on_a_non_half_step_points_possible_does_not_crash():
+    # Regression: points_possible isn't guaranteed to be a multiple of the
+    # 0.5 rounding step (e.g. an instructor's "4.3 points"). Awarding full
+    # credit used to round 4.3 up to 4.5 and then reject it as exceeding the
+    # un-rounded 4.3 -- a rounding artifact, not bad data, must not crash
+    # ordinary full credit.
+    pg = c.ProblemGrade(problem_id=f.Q1, points_awarded=4.3, points_possible=4.3, evidence="x")
+    assert pg.points_awarded == 4.3
+
+
+def test_round_award_clamps_rounding_overshoot_but_not_real_bad_data():
+    assert c.round_award(4.3, 4.3) == 4.3
+    assert c.round_award(4.3, 5.0) == 4.5  # ordinary rounding, well within range
+    assert c.round_award(6.0, 5.0) == 6.0  # genuinely too high -- not this helper's job to clamp it
+
+
 def test_non_graded_outcome_awards_zero():
     with pytest.raises(ValidationError):
         c.ProblemGrade(problem_id=f.Q1, outcome=c.ProblemOutcome.NO_ANSWER,

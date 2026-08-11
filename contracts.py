@@ -78,6 +78,26 @@ def round_to_step(value: float, step: float = DEFAULT_ROUNDING_STEP) -> float:
     return round(math.floor(value / step + 0.5) * step, 4)
 
 
+def round_award(points_awarded: float, points_possible: float, step: float = DEFAULT_ROUNDING_STEP) -> float:
+    """`round_to_step`, but never let the rounding itself push an
+    already-in-range award above `points_possible`.
+
+    `points_possible` isn't guaranteed to be a multiple of `step` (an
+    instructor's stated point value like "4.3 points", or an uneven split
+    across problems) -- rounding a legitimate full-credit award of 4.3 up to
+    4.5 and then comparing to the un-rounded 4.3 would reject ordinary full
+    credit. Used both where a `GraderResult` is first produced (so the
+    logged trace step already matches what the final `ProblemGrade` will
+    store) and by `ProblemGrade`'s own validator (the last-resort gate that
+    still rejects a genuinely too-high award instead of silently clamping
+    it).
+    """
+    rounded = round_to_step(points_awarded, step)
+    if rounded > points_possible and points_awarded <= points_possible:
+        return points_possible
+    return rounded
+
+
 def rough_token_estimate(text: str) -> int:
     """Cheap token estimate (~4 chars/token) for P1's budget check. Swap for a
     real tokenizer later; the seam does not change."""
@@ -334,13 +354,16 @@ class ProblemGrade(BaseModel):
 
     @model_validator(mode="after")
     def _check_scoring(self) -> "ProblemGrade":
-        # Round awarded points to the allowed step (decision 3).
-        object.__setattr__(self, "points_awarded", round_to_step(self.points_awarded))
-        if self.points_awarded > self.points_possible:
+        # Round awarded points to the allowed step (decision 3), clamping a
+        # pure rounding-boundary overshoot (see `round_award`) but still
+        # rejecting a genuinely too-high award as real bad data.
+        rounded = round_award(self.points_awarded, self.points_possible)
+        if rounded > self.points_possible:
             raise ValueError(
                 f"points_awarded ({self.points_awarded}) exceeds points_possible "
                 f"({self.points_possible}) for problem {self.problem_id}"
             )
+        object.__setattr__(self, "points_awarded", rounded)
         if self.outcome in (ProblemOutcome.NO_ANSWER, ProblemOutcome.UNGRADEABLE):
             # Non-graded outcomes must not silently carry credit.
             if self.points_awarded != 0:

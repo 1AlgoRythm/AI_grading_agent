@@ -125,7 +125,12 @@ def _looks_like_problem_heading(line: str) -> bool:
     )
 
 
-def _split_problem_blocks(text: str) -> list[str]:
+def _split_problem_blocks(text: str) -> tuple[list[str], bool]:
+    """Returns (blocks, saw_heading) -- callers that decide whether a leading
+    block is a preamble need to know whether splitting actually happened on
+    real heading lines, not on the blank-line paragraph fallback, where a
+    "first block with no heading words" is just as likely to be problem 1
+    itself as it is a preamble."""
     lines = text.splitlines()
     blocks: list[str] = []
     current: list[str] = []
@@ -145,14 +150,14 @@ def _split_problem_blocks(text: str) -> list[str]:
         blocks.append("\n".join(current).strip())
 
     if saw_heading and blocks:
-        return [block for block in blocks if block]
+        return [block for block in blocks if block], True
 
     paragraphs = [part.strip() for part in re.split(r"\n\s*\n", text) if part.strip()]
-    return paragraphs
+    return paragraphs, False
 
 
 def _split_submission_blocks(text: str) -> list[str]:
-    blocks = _split_problem_blocks(text)
+    blocks, _saw_heading = _split_problem_blocks(text)
     return blocks if blocks else ([text.strip()] if text.strip() else [])
 
 
@@ -193,11 +198,17 @@ def _template_submission() -> Submission:
 
 
 def _build_parsed_assignment(source: str, text: str, assignment_type: str = "math") -> Assignment | None:
-    blocks = _split_problem_blocks(text)
+    blocks, saw_heading = _split_problem_blocks(text)
     if not blocks:
         return None
 
-    if len(blocks) > 1:
+    # Only a heading-based split lets us tell a preamble apart from problem
+    # 1: every real block there starts with a detected heading line by
+    # construction, so a leading block that doesn't is provably pre-heading
+    # content. The blank-line paragraph fallback (no headings found at all)
+    # has no such signal -- treating its first paragraph as a discardable
+    # preamble was silently dropping a real, headerless first problem.
+    if saw_heading and len(blocks) > 1:
         first_block = blocks[0]
         first_line = first_block.splitlines()[0] if first_block.splitlines() else first_block
         looks_like_preamble = (
@@ -303,6 +314,25 @@ def ingest_assignment(source: str, assignment_type: str = "math") -> Assignment:
     return _strip_fixture_solutions(fixtures.sample_assignment())
 
 
+def _remap_answers_to_assignment(sub: Submission, assignment: Assignment) -> None:
+    """Point a fixture/template stand-in's answers at real problems in
+    `assignment`, the same way `_resolve_problem_id` maps real parsed
+    blocks. Without this, a stand-in submission kept whichever problem_ids
+    the fixture it was copied from happened to carry -- ids that belong to
+    a *different* Assignment object and don't exist in `assignment.problems`,
+    which crashed `build_submission_context` with a `KeyError`. An answer
+    that doesn't map to any real problem (more stand-in answers than the
+    assignment has problems) is dropped rather than kept under a fake id."""
+    remapped: list[SubmissionAnswer] = []
+    for index, ans in enumerate(sub.answers, start=1):
+        resolved = _resolve_problem_id(ans.work_text or "", index, assignment)
+        if resolved is None:
+            continue
+        ans.problem_id = resolved
+        remapped.append(ans)
+    sub.answers = remapped
+
+
 def ingest_submission(source: str, assignment: Optional[Assignment] = None) -> Submission:
     """Parse a student submission source into a structured `Submission`.
 
@@ -314,22 +344,26 @@ def ingest_submission(source: str, assignment: Optional[Assignment] = None) -> S
     whenever you have it. Without it, ids are placeholders the caller must
     remap once it knows which assignment the submission belongs to.
     """
-    lower = (source or "").lower()
-    if "sample" in lower or "student_07" in lower:
-        sub = fixtures.sample_submission().model_copy(deep=True)
-        if assignment is not None:
-            sub.assignment_id = assignment.id
-        return sub
-
     text = _read_source_text(source)
     if text:
         parsed = _build_parsed_submission(source, text, assignment)
         if parsed is not None:
             return parsed
 
-    sub = _template_submission()
+    # No real, parseable content -- fall back to a stand-in. Matched against
+    # the source's file stem only, never against submission prose: matching
+    # "sample" anywhere in a real student's pasted text (e.g. "for example",
+    # "sample size" in a stats problem) used to discard their actual
+    # submission and silently substitute the packaged fixture answers.
+    stem = Path(source).stem.lower() if source else ""
+    if "sample" in stem or "student_07" in stem:
+        sub = fixtures.sample_submission().model_copy(deep=True)
+    else:
+        sub = _template_submission()
+
     if assignment is not None:
         sub.assignment_id = assignment.id
+        _remap_answers_to_assignment(sub, assignment)
     for ans in sub.answers:
         ans.work_text = _sanitize_text(ans.work_text or "")
         if ans.final_answer:
