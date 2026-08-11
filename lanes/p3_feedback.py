@@ -6,13 +6,14 @@ import re
 from dataclasses import dataclass
 from uuid import UUID
 
-from contracts import Grade, ProblemGrade, ProblemOutcome, Rubric
+from contracts import Assignment, Grade, ProblemGrade, ProblemOutcome, Rubric, problem_label_map
 from lanes.p3_review import finalize
 from model_provider import call_model
 
 __all__ = [
     "answer_followup",
     "clear_feedback_contexts",
+    "feedback_history",
     "finalize",
     "generate_feedback",
     "register_feedback_context",
@@ -78,36 +79,116 @@ def generate_feedback(grade: Grade, rubric: Rubric) -> dict[UUID, str]:
     }
 
 
+def _criterion_field(criterion, field: str, default: str = "") -> str:
+    """Criteria arrive as RubricCriterion objects or plain dicts depending on
+    the caller -- the same dual access lanes/p1_context.py's build_context
+    already uses."""
+    value = criterion.get(field) if isinstance(criterion, dict) else getattr(criterion, field, None)
+    return str(value) if value not in (None, "") else default
+
+
+def _truncate(text: str | None, limit: int) -> str:
+    text = _clean(text)
+    return text if len(text) <= limit else text[:limit].rsplit(" ", 1)[0] + " ..."
+
+
 @dataclass(frozen=True)
 class FeedbackContext:
     grade: Grade
     rubric: Rubric
+    assignment: Assignment | None
+    labels: dict[UUID, str]
 
 
 _FEEDBACK_CONTEXTS: dict[UUID, FeedbackContext] = {}
+# Bounded per-submission transcript. A follow-up chat where every turn is
+# turn one cannot resolve "explain that differently" -- the pronoun has no
+# referent. The recorded grade stays the ground truth; this only supplies
+# conversational continuity, and it is never used as evidence.
+_FEEDBACK_HISTORY: dict[UUID, list[tuple[str, str]]] = {}
+
+_MAX_HISTORY_TURNS = 6
+_MAX_STORED_TURNS = 20
 
 
-def register_feedback_context(grade: Grade, rubric: Rubric) -> None:
-    """Register grounded context for the contract's submission-id chat seam."""
+def register_feedback_context(
+    grade: Grade, rubric: Rubric, assignment: Assignment | None = None
+) -> None:
+    """Register grounded context for the contract's submission-id chat seam.
+
+    `assignment` is optional (defaulted to None so every existing caller is
+    unaffected) but strongly wanted: without it the chat sees only scores
+    and evidence, so it cannot answer "what was the question?" or "how
+    should I have solved it?" -- the two things students actually ask. With
+    it, the chat is grounded in the same approved statement, reference
+    solution, and rubric that build_context handed the grader.
+    """
     if grade.assignment_id != rubric.assignment_id:
         raise ValueError("grade and rubric must belong to the same assignment")
+    if assignment is not None and assignment.id != grade.assignment_id:
+        raise ValueError("assignment does not match the grade's assignment")
+
+    previous = _FEEDBACK_CONTEXTS.get(grade.submission_id)
+    # Streamlit re-runs render() on every interaction, so resetting
+    # unconditionally would wipe the transcript on every turn. Only a
+    # genuinely different grade starts a new conversation.
+    if previous is not None and previous.grade.id != grade.id:
+        _FEEDBACK_HISTORY.pop(grade.submission_id, None)
+
     _FEEDBACK_CONTEXTS[grade.submission_id] = FeedbackContext(
-        grade=grade.model_copy(deep=True), rubric=rubric.model_copy(deep=True)
+        grade=grade.model_copy(deep=True),
+        rubric=rubric.model_copy(deep=True),
+        assignment=assignment.model_copy(deep=True) if assignment else None,
+        labels=problem_label_map(assignment) if assignment else {},
     )
+
+
+def feedback_history(submission_id: UUID) -> list[tuple[str, str]]:
+    """(question, answer) pairs so far, oldest first. For rendering."""
+    return list(_FEEDBACK_HISTORY.get(submission_id, ()))
 
 
 def clear_feedback_contexts() -> None:
     _FEEDBACK_CONTEXTS.clear()
+    _FEEDBACK_HISTORY.clear()
+
+
+def _grounding_block(context: FeedbackContext) -> str:
+    """The same material that produced the grade: statement, approved
+    reference, rubric criteria, and the recorded score/evidence."""
+    feedback = generate_feedback(context.grade, context.rubric)
+    problems = {p.id: p for p in (context.assignment.problems if context.assignment else [])}
+
+    lines: list[str] = []
+    for item in context.grade.problem_grades:
+        label = context.labels.get(item.problem_id) or item.problem_id.hex[-2:]
+        lines.append(f"--- Problem {label} ---")
+
+        problem = problems.get(item.problem_id)
+        if problem is not None:
+            lines.append(f"Question: {_clean(problem.statement)}")
+            if problem.reference_answer:
+                lines.append(f"Approved reference answer: {_clean(problem.reference_answer)}")
+            if problem.reference_solution:
+                lines.append(f"Approved reference solution: {_truncate(problem.reference_solution, 700)}")
+
+        for criterion in context.rubric.for_problem(item.problem_id) or []:
+            name = _criterion_field(criterion, "name", "criterion")
+            points = _criterion_field(criterion, "points", "?")
+            description = _criterion_field(criterion, "description")
+            if description:
+                lines.append(f"Rubric — {name} ({points} pts): {description}")
+
+        lines.append(f"Grade recorded: {feedback[item.problem_id]}")
+        lines.append("")
+    return "\n".join(lines).strip()
 
 
 def answer_followup(question: str, submission_id: UUID) -> str:
-    """Answer a student's follow-up question, grounded in the recorded grade.
+    """Answer a student's follow-up, grounded in the recorded grade, the
+    approved solution and rubric (when registered with an assignment), and
+    the conversation so far.
 
-    The grounding block is generate_feedback's own per-problem output --
-    the same evidence, rubric criteria, and score already shown on the grade
-    panel -- fed to the model with an explicit instruction to answer from it
-    alone and say so plainly when a question isn't covered by it, rather
-    than freelancing an answer the recorded grade doesn't actually support.
     Fails closed: with no registered context, this returns the "not
     available yet" message without ever calling the model.
     """
@@ -121,19 +202,30 @@ def answer_followup(question: str, submission_id: UUID) -> str:
             "not available for this submission. Please ask the instructor."
         )
 
-    feedback = generate_feedback(context.grade, context.rubric)
-    grounding = "\n".join(
-        f"Problem {problem_id.hex[-2:]}: {text}" for problem_id, text in feedback.items()
-    )
+    history = _FEEDBACK_HISTORY.setdefault(submission_id, [])
+    transcript = ""
+    if history:
+        recent = "\n".join(f"Student: {q}\nYou: {a}" for q, a in history[-_MAX_HISTORY_TURNS:])
+        transcript = f"\nEarlier in this conversation:\n{recent}\n"
+
     prompt = (
-        "You are answering a student's question about their graded assignment. "
-        "Answer using ONLY the recorded grading evidence below -- do not invent "
-        "reasoning, scores, or rubric criteria that aren't in it. If the question "
-        "asks about something this evidence doesn't cover (for example, how a "
-        "problem *should* have been solved, when only the grade on what they "
-        "actually submitted is recorded), say plainly that it isn't covered in "
-        "the recorded grade instead of guessing.\n\n"
-        f"Recorded grading evidence:\n{grounding}\n\n"
+        "You are explaining a graded assignment to the student who submitted "
+        "it. Be direct and encouraging.\n\n"
+        "Answer using ONLY the recorded grading evidence below -- do not "
+        "invent reasoning, scores, or rubric criteria that aren't in it. If "
+        "the question asks about something this evidence doesn't cover, say "
+        "plainly that it isn't covered in the recorded grade instead of "
+        "guessing.\n\n"
+        "If the student asks how a problem should have been solved, the "
+        "approved reference solution below (when included) IS part of the "
+        "recorded evidence -- use it rather than saying that's not covered. "
+        "Never change a score; scores are set by the instructor, not by "
+        "this chat.\n\n"
+        f"=== Recorded grading evidence for this submission ===\n{_grounding_block(context)}\n"
+        f"{transcript}\n"
         f"Student question: {question}"
     )
-    return call_model(prompt, max_tokens=400).strip()
+    answer = call_model(prompt, max_tokens=500).strip()
+    history.append((question, answer))
+    del history[:-_MAX_STORED_TURNS]
+    return answer

@@ -118,7 +118,8 @@ def _grade_one_problem(
                 "problem_id": str(problem_id),
                 "critique": critique.critique,
             }))
-            result = run_grader(ctx, matched, critique=critique.critique)
+            previous_result = result
+            result = run_grader(ctx, matched, critique=critique.critique, previous=previous_result)
             revisions = 1
             # The final ProblemGrade below uses this revised `result`, not
             # the one already logged above -- without a second REASON step,
@@ -133,7 +134,7 @@ def _grade_one_problem(
                 "rationale": result.rationale,
                 "after_revision": True,
             }))
-            recheck = run_critic(ctx, result)
+            recheck = run_critic(ctx, result, previous_critique=critique.critique)
             steps.append(Step(type=StepKind.CRITIQUE, data={
                 "problem": tag,
                 "problem_id": str(problem_id),

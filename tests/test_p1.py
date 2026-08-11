@@ -889,6 +889,81 @@ def test_draft_rubric_lets_the_real_model_choose_a_different_criteria_count_per_
     assert len(by_problem[long_problem.id]) == 4
 
 
+def test_draft_rubric_passes_through_model_provided_failure_signals(monkeypatch):
+    # Fix: the prompt now asks for failure_signals, and draft_rubric must
+    # actually keep them -- p2_grader._offline_fallback and
+    # p2_critic._offline_fallback both scan criterion.failure_signals, and
+    # that machinery was dead code for every real drafted rubric until now.
+    assignment = Assignment(label="hw", title="HW", type="math")
+    problem = Problem(assignment_id=assignment.id, label="Q1", statement="Solve x + 2 = 5", points_possible=5)
+    assignment.problems.append(problem)
+    fake_response = {
+        "criteria": [
+            {
+                "problem_id": str(problem.id), "name": "Correct answer", "description": "d",
+                "points": 5, "failure_signals": ["sign error", "  ", "dropped term"],
+            },
+        ]
+    }
+    monkeypatch.setattr(p1_solution, "call_model_json", lambda prompt, max_tokens=1024, **kw: fake_response)
+
+    rubric = p1_solution.draft_rubric(assignment, {})
+
+    assert rubric.criteria[0].failure_signals == ["sign error", "dropped term"]  # blank entries dropped
+
+
+def test_draft_rubric_rescales_criteria_that_dont_sum_to_points_possible(monkeypatch):
+    # Fix: the prompt asks for criteria points to sum to points_possible, but
+    # nothing verified it -- a 5-point problem could come back with criteria
+    # totalling 3 or 9 and flow straight to the reviewer unchecked.
+    assignment = Assignment(label="hw", title="HW", type="math")
+    problem = Problem(assignment_id=assignment.id, label="Q1", statement="Solve x + 2 = 5", points_possible=5)
+    assignment.problems.append(problem)
+    fake_response = {
+        "criteria": [
+            {"problem_id": str(problem.id), "name": "A", "description": "d", "points": 1},
+            {"problem_id": str(problem.id), "name": "B", "description": "d", "points": 2},
+        ]  # sums to 3, not 5
+    }
+    monkeypatch.setattr(p1_solution, "call_model_json", lambda prompt, max_tokens=1024, **kw: fake_response)
+
+    rubric = p1_solution.draft_rubric(assignment, {})
+
+    assert sum(c.points for c in rubric.criteria) == pytest.approx(5.0)
+    assert rubric.criteria[0].points == pytest.approx(1 * (5 / 3), abs=1e-3)
+    assert "rescaled" in rubric.leniency_note.lower()
+
+
+def test_draft_rubric_fills_in_a_problem_the_model_gave_zero_criteria(monkeypatch):
+    # Fix: valid_criteria silently drops any criterion whose problem_id
+    # doesn't match a real one, and the `or _generated_criteria(...)`
+    # fallback only fired when EVERY criterion was invalid -- partial
+    # coverage (one problem fully covered, another with zero criteria)
+    # passed through silently. That uncovered problem then computed
+    # points_possible = 0 in p2_engine's no-context branch.
+    assignment = Assignment(label="hw", title="HW", type="math")
+    covered = Problem(assignment_id=assignment.id, label="Q1", statement="Solve x + 2 = 5", points_possible=5)
+    uncovered = Problem(assignment_id=assignment.id, label="Q2", statement="Solve y - 1 = 4", points_possible=5)
+    assignment.problems.extend([covered, uncovered])
+    fake_response = {
+        "criteria": [
+            {"problem_id": str(covered.id), "name": "Correct", "description": "d", "points": 5},
+            # No criterion at all for `uncovered`.
+        ]
+    }
+    monkeypatch.setattr(p1_solution, "call_model_json", lambda prompt, max_tokens=1024, **kw: fake_response)
+
+    rubric = p1_solution.draft_rubric(assignment, {})
+
+    by_problem: dict = {}
+    for c in rubric.criteria:
+        by_problem.setdefault(c.problem_id, []).append(c)
+    assert len(by_problem[covered.id]) == 1
+    assert len(by_problem[uncovered.id]) >= 1  # filled in from the offline template
+    assert sum(c.points for c in by_problem[uncovered.id]) == pytest.approx(5.0)
+    assert "no criteria" in rubric.leniency_note.lower()
+
+
 def test_draft_rubric_gives_each_assignment_its_own_rubric_id(tmp_path):
     # sample_rubric() also carries the fixture's own rubric id. Reusing it
     # for every assignment meant P1Store.save_rubric (merge on id, delete

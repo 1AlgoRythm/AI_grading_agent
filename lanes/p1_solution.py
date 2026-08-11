@@ -194,6 +194,7 @@ def _generated_criteria(assignment: Assignment, method_context: dict) -> list[di
             "name": "Correct final answer",
             "description": "Final answer matches the approved reference.",
             "points": round(possible * 0.5, 4),
+            "failure_signals": ["final answer differs from the reference"],
         })
 
         # Grounding, not copy-paste: the offline template has no model to ask
@@ -211,6 +212,7 @@ def _generated_criteria(assignment: Assignment, method_context: dict) -> list[di
             "name": "Valid method or approach",
             "description": method_description,
             "points": round(possible * 0.25, 4),
+            "failure_signals": ["no method shown", "answer stated without working"],
         })
 
         generated_criteria.append({
@@ -233,6 +235,60 @@ def _generated_criteria(assignment: Assignment, method_context: dict) -> list[di
             "points": round(possible * 0.10, 4),
         })
     return generated_criteria
+
+
+def _normalize_and_fill(
+    criteria: list[dict], assignment: Assignment, method_context: dict
+) -> tuple[list[dict], list[str]]:
+    """Enforce the two invariants draft_rubric's prompt asks for but nothing
+    ever checked before this: every problem must have at least one
+    criterion, and each problem's criteria must sum to that problem's
+    points_possible. A rubric violating either reaches the grader as a
+    silently wrong weighting -- or, for an uncovered problem, as
+    points_possible = 0 in p2_engine's no-context branch. Rescaling
+    preserves the model's judgment about *relative* weights while enforcing
+    the total; only a problem with no criteria at all falls back to the
+    offline template.
+
+    Returns (criteria, notes) -- notes are surfaced to the human reviewer
+    rather than silently swallowed, since a repaired rubric is exactly the
+    thing the approval gate exists to catch.
+    """
+    template_by_problem: dict = {}
+    notes: list[str] = []
+    out: list[dict] = []
+
+    for problem in assignment.problems:
+        mine = [c for c in criteria if c.get("problem_id") == problem.id]
+
+        if not mine:
+            if not template_by_problem:
+                for entry in _generated_criteria(assignment, method_context):
+                    template_by_problem.setdefault(entry["problem_id"], []).append(entry)
+            out.extend(template_by_problem.get(problem.id, []))
+            notes.append(
+                f"{problem.label}: the model returned no criteria; filled in from the "
+                f"default template. Review this problem's rubric closely."
+            )
+            continue
+
+        total = sum(float(c.get("points") or 0) for c in mine)
+        if total <= 0:
+            share = round(problem.points_possible / len(mine), 4)
+            for c in mine:
+                c["points"] = share
+            notes.append(f"{problem.label}: criteria had no positive points; split evenly.")
+        elif abs(total - problem.points_possible) > 0.01:
+            factor = problem.points_possible / total
+            for c in mine:
+                c["points"] = round(float(c.get("points") or 0) * factor, 4)
+            notes.append(
+                f"{problem.label}: criteria summed to {total:g}, rescaled to "
+                f"{problem.points_possible:g}."
+            )
+        out.extend(mine)
+
+    return out, notes
 
 
 def draft_rubric(assignment: Assignment, method_context: dict) -> Rubric:
@@ -290,10 +346,17 @@ def draft_rubric(assignment: Assignment, method_context: dict) -> Rubric:
         "genuinely need only one or two; a multi-step derivation may need four or five. "
         "Each problem's criteria points should sum to that problem's total points_possible "
         "given above.\n"
+        "For each criterion also give 2-4 \"failure_signals\": short, concrete, "
+        "literal phrases a grader would find in flawed student work for THIS "
+        "problem (e.g. \"middle term missing\", \"sign error when collecting like "
+        "terms\"). These are matched against the shown work, so write them as "
+        "things a student's writing would actually contain, not as abstract "
+        "descriptions of the mistake.\n"
         "For each criterion, set \"problem_id\" to EXACTLY one of the problem_id "
         "strings given above (copy it verbatim) -- never invent a new one.\n"
         "Respond with ONLY a JSON object: {\"criteria\": [{\"problem_id\": <string>, "
-        "\"name\": <string>, \"description\": <string>, \"points\": <number>}, ...]}."
+        "\"name\": <string>, \"description\": <string>, \"points\": <number>, "
+        "\"failure_signals\": [<string>, ...]}, ...]}."
     )
     raw = call_model_json(prompt, max_tokens=1024)
     criteria = None
@@ -319,9 +382,19 @@ def draft_rubric(assignment: Assignment, method_context: dict) -> Rubric:
             real_id = problems_by_id.get(str(item.get("problem_id")))
             if real_id is None:
                 continue
-            valid_criteria.append({**item, "problem_id": real_id})
+            signals = item.get("failure_signals")
+            if isinstance(signals, str):
+                signals = [signals]
+            signals = [str(s).strip() for s in signals if str(s).strip()] if isinstance(signals, list) else []
+            valid_criteria.append({**item, "problem_id": real_id, "failure_signals": signals})
 
-    r.criteria = valid_criteria or _generated_criteria(assignment, method_context)
+    criteria = valid_criteria or _generated_criteria(assignment, method_context)
+    r.criteria, notes = _normalize_and_fill(criteria, assignment, method_context)
+    if notes:
+        r.leniency_note = (r.leniency_note or "") + (
+            "\n\nAutomatic rubric checks repaired the following before review: "
+            + "; ".join(notes)
+        )
     r.status = ArtifactStatus.PROPOSED
     return r
 

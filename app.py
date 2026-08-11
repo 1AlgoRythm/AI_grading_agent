@@ -25,11 +25,13 @@ import streamlit as st
 import p1_app
 import p2_app
 import p3_app
+import student_app
 
 PAGES = {
     "Upload & Rubric": p1_app.render,
     "Grade & Trace": p2_app.render,
     "Review & Feedback": p3_app.render,
+    "Student Feedback Chat": student_app.render,
 }
 
 

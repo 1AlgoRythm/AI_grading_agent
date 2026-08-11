@@ -40,8 +40,12 @@ class CriticResult:
     critique: Optional[str]
 
 
-def build_critic_prompt(context: GradingContext, grader_result: GraderResult) -> str:
-    return (
+def build_critic_prompt(
+    context: GradingContext,
+    grader_result: GraderResult,
+    previous_critique: Optional[str] = None,
+) -> str:
+    prompt = (
         "TASK: CRITIQUE\n"
         "You are an adversarial grading critic. Your only job is to find what "
         "is wrong with the proposed grade below — do not be agreeable by "
@@ -65,6 +69,21 @@ def build_critic_prompt(context: GradingContext, grader_result: GraderResult) ->
         "\"critique\": <string explaining your independent judgment, or null "
         "if you agree>}."
     )
+    if previous_critique:
+        # Bounds the loop: without this, the critic (handed the grader's
+        # revision but not its own prior objection) can restate a concern
+        # already addressed, or raise a brand-new one on fresh grounds,
+        # which guarantees escalation even on a grade that was actually
+        # fixed.
+        prompt += (
+            "\n\nYOU RAISED THIS OBJECTION ON THE PREVIOUS ROUND:\n"
+            f"{previous_critique!r}\n"
+            "The grade above is the grader's revision in response to it. "
+            "Judge ONLY whether that objection has now been addressed. Do not "
+            "introduce a new, unrelated objection at this stage -- if your "
+            "original concern is resolved, agree."
+        )
+    return prompt
 
 
 def _parse_response(raw: object) -> Optional[CriticResult]:
@@ -149,8 +168,12 @@ def _offline_fallback(context: GradingContext, grader_result: GraderResult) -> C
     return CriticResult(agrees=True, critique=None)
 
 
-def run_critic(context: GradingContext, grader_result: GraderResult) -> CriticResult:
-    prompt = build_critic_prompt(context, grader_result)
+def run_critic(
+    context: GradingContext,
+    grader_result: GraderResult,
+    previous_critique: Optional[str] = None,
+) -> CriticResult:
+    prompt = build_critic_prompt(context, grader_result, previous_critique)
     # `or` (not getenv's own default) because a blank .env line like
     # "CRITIC_TEMPERATURE=" sets the var to "" rather than leaving it unset --
     # getenv's default only kicks in when the key is missing entirely.

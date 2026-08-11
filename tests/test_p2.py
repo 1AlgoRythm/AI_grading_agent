@@ -433,3 +433,100 @@ def test_critic_respects_env_var_overrides_for_model_and_temperature(monkeypatch
 
     assert captured["temperature"] == pytest.approx(0.3)
     assert captured["model"] == "a-different-model"
+
+
+def test_grader_prompt_carries_its_own_previous_proposal_on_revision():
+    # Fix: without this, the revision-round grader was handed a critique
+    # with no visible referent for its own prior number -- it re-derived
+    # from scratch, often reached the same score by the same route, and the
+    # critic objected again (the escalation loop this fix targets).
+    from lanes import p2_grader
+
+    ctx = _bare_context(f.Q2, "(x + 1)^2 = x^2 + 1.", "x^2 + 1")
+    previous = p2_grader.GraderResult(
+        points_awarded=2.5, evidence="prior evidence text",
+        partial_credit_reason="prior reason", rationale="prior rationale",
+    )
+
+    prompt = p2_grader.build_grader_prompt(ctx, tool_matched=False, critique="not specific enough", previous=previous)
+
+    assert "YOUR PREVIOUS PROPOSAL" in prompt
+    assert "2.5" in prompt and "prior evidence text" in prompt
+
+
+def test_grader_prompt_omits_previous_proposal_when_none_given():
+    # Every existing caller (first grading pass, and any caller that
+    # predates this fix) must see exactly the same prompt as before.
+    from lanes import p2_grader
+
+    ctx = _bare_context(f.Q2, "(x + 1)^2 = x^2 + 1.", "x^2 + 1")
+    prompt = p2_grader.build_grader_prompt(ctx, tool_matched=False, critique="not specific enough")
+    assert "YOUR PREVIOUS PROPOSAL" not in prompt
+
+
+def test_critic_prompt_carries_its_own_previous_objection_on_recheck():
+    # Fix: without this, the recheck critic (handed the grader's revision
+    # but not its own prior objection) could restate an already-addressed
+    # concern or raise an unrelated new one, guaranteeing escalation even on
+    # a grade that was actually fixed.
+    from lanes import p2_critic, p2_grader
+
+    ctx = _bare_context(f.Q2, "(x + 1)^2 = x^2 + 1.", "x^2 + 1")
+    result = p2_grader.GraderResult(
+        points_awarded=2.5, evidence="revised evidence", partial_credit_reason="revised reason",
+        rationale="revised rationale",
+    )
+
+    prompt = p2_critic.build_critic_prompt(ctx, result, previous_critique="the middle term was dropped")
+
+    assert "YOU RAISED THIS OBJECTION" in prompt
+    assert "the middle term was dropped" in prompt
+    assert "if your original concern is resolved, agree" in prompt.lower()
+
+
+def test_critic_prompt_omits_previous_objection_when_none_given():
+    from lanes import p2_critic, p2_grader
+
+    ctx = _bare_context(f.Q2, "(x + 1)^2 = x^2 + 1.", "x^2 + 1")
+    result = p2_grader.GraderResult(
+        points_awarded=2.5, evidence="e", partial_credit_reason="r", rationale="ra",
+    )
+    prompt = p2_critic.build_critic_prompt(ctx, result)
+    assert "YOU RAISED THIS OBJECTION" not in prompt
+
+
+def test_p2_engine_revision_round_wires_grader_and_critic_memory_through(monkeypatch):
+    # Integration-level: lanes/p2_engine.py's revision round must actually
+    # pass the grader's prior proposal and the critic's prior objection
+    # through, not just have the plumbing exist unused in p2_grader.py/
+    # p2_critic.py. Uses _grade_one_problem directly (not the full 2-problem
+    # fixture submission) so there's no objectively-matched Q1 grader call
+    # to account for -- isolates exactly the revision-round code path.
+    from lanes import p2_critic, p2_engine, p2_grader
+
+    ctx = _bare_context(f.Q2, "(x + 1)^2 = x^2 + 1.", "x^2 + 1")
+    grader_prompts = []
+    critic_prompts = []
+
+    def fake_grader_json(prompt, max_tokens=768, temperature=0.0, model=None):
+        grader_prompts.append(prompt)
+        return {"points_awarded": 2.5, "evidence": "e", "partial_credit_reason": "r", "rationale": "ra"}
+
+    def fake_critic_json(prompt, max_tokens=512, temperature=0.7, model=None):
+        critic_prompts.append(prompt)
+        # Disagree on the first call (forces the revision round), agree on the second.
+        return {"agrees": len(critic_prompts) > 1, "critique": None if len(critic_prompts) > 1 else "not specific"}
+
+    monkeypatch.setattr(p2_grader, "call_model_json", fake_grader_json)
+    monkeypatch.setattr(p2_critic, "call_model_json", fake_critic_json)
+
+    problem_grade, revisions = p2_engine._grade_one_problem(f.Q2, "x^2 + 1", ctx, ctx.points_possible, [])
+
+    assert revisions == 1
+    assert len(grader_prompts) == 2  # initial pass + one bounded revision
+    assert len(critic_prompts) == 2  # initial critique + one recheck
+    assert "YOUR PREVIOUS PROPOSAL" not in grader_prompts[0]
+    assert "YOUR PREVIOUS PROPOSAL" in grader_prompts[1]
+    assert "YOU RAISED THIS OBJECTION" not in critic_prompts[0]
+    assert "YOU RAISED THIS OBJECTION" in critic_prompts[1]
+    assert "not specific" in critic_prompts[1]  # the critic's own prior wording, carried forward

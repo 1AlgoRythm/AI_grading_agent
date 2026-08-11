@@ -108,6 +108,86 @@ def test_followup_asking_how_it_should_have_been_solved_is_still_grounded_not_fr
     assert "How was problem b2 supposed to be solved?" in calls["prompt"]
 
 
+def test_followup_grounded_with_an_assignment_can_answer_how_it_should_have_been_solved(monkeypatch):
+    # Fix: without an assignment registered, the chat can't see problem
+    # statements or the approved reference solution at all -- "how should I
+    # have solved it," the most common student question, was unanswerable
+    # even though the answer is sitting right there in
+    # problem.reference_solution.
+    clear_feedback_contexts()
+    assignment = f.sample_assignment()
+    register_feedback_context(f.sample_grade(), f.sample_rubric(), assignment)
+    calls = {}
+
+    def fake_call_model(prompt, max_tokens=512):
+        calls["prompt"] = prompt
+        return "Subtract 1, then take the square root."
+
+    monkeypatch.setattr(p3_feedback, "call_model", fake_call_model)
+
+    answer_followup("How was problem b2 supposed to be solved?", f.SID)
+
+    q2 = next(p for p in assignment.problems if p.id == f.Q2)
+    assert q2.reference_solution in calls["prompt"]
+    assert "Expand and simplify" in calls["prompt"]  # q2.statement, whitespace-normalized by _clean
+
+
+def test_followup_remembers_earlier_turns_in_the_same_conversation(monkeypatch):
+    # Fix: every call used to build a fresh prompt with no conversation
+    # memory -- "explain that more simply" has no referent without it.
+    clear_feedback_contexts()
+    register_feedback_context(f.sample_grade(), f.sample_rubric())
+    monkeypatch.setattr(p3_feedback, "call_model", lambda prompt, max_tokens=512: "First answer.")
+    answer_followup("Why did I lose points on Q2?", f.SID)
+
+    calls = {}
+
+    def fake_call_model(prompt, max_tokens=512):
+        calls["prompt"] = prompt
+        return "Second answer."
+
+    monkeypatch.setattr(p3_feedback, "call_model", fake_call_model)
+    answer_followup("Explain that more simply.", f.SID)
+
+    assert "Why did I lose points on Q2?" in calls["prompt"]
+    assert "First answer." in calls["prompt"]
+    assert p3_feedback.feedback_history(f.SID) == [
+        ("Why did I lose points on Q2?", "First answer."),
+        ("Explain that more simply.", "Second answer."),
+    ]
+
+
+def test_registering_a_different_grade_for_the_same_submission_starts_a_fresh_conversation(monkeypatch):
+    # A new grade (a re-grade) for the same submission_id must not inherit
+    # the previous grade's transcript -- but re-registering the exact SAME
+    # grade (e.g. every Streamlit rerun) must not wipe an in-progress
+    # conversation either.
+    clear_feedback_contexts()
+    grade = f.sample_grade()
+    register_feedback_context(grade, f.sample_rubric())
+    monkeypatch.setattr(p3_feedback, "call_model", lambda prompt, max_tokens=512: "An answer.")
+    answer_followup("A question.", f.SID)
+    assert len(p3_feedback.feedback_history(f.SID)) == 1
+
+    # Same grade, re-registered (a Streamlit rerun) -- history survives.
+    register_feedback_context(grade, f.sample_rubric())
+    assert len(p3_feedback.feedback_history(f.SID)) == 1
+
+    # A genuinely different grade for the same submission -- fresh start.
+    regraded = grade.model_copy(deep=True, update={"id": uuid4()})
+    register_feedback_context(regraded, f.sample_rubric())
+    assert p3_feedback.feedback_history(f.SID) == []
+
+
+def test_register_feedback_context_rejects_an_assignment_that_doesnt_match_the_grade():
+    clear_feedback_contexts()
+    from contracts import Assignment
+
+    mismatched = Assignment(label="other", title="Other", type="math")
+    with pytest.raises(ValueError, match="assignment does not match"):
+        register_feedback_context(f.sample_grade(), f.sample_rubric(), mismatched)
+
+
 def test_override_is_audited_then_finalized_without_losing_provenance():
     grade, audit = f.sample_grade(), InMemoryAuditLog()
     override_problem_score(grade, f.Q2, 3.5, "instructor_1", "Correct expansion setup shown", audit)

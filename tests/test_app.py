@@ -262,3 +262,35 @@ def test_batch_grading_table_sorts_errors_and_escalations_first_and_row_click_ac
     assert at.session_state["p2_grade"].id == last_grade[1].id
     at.sidebar.radio[0].set_value("Review & Feedback").run()
     assert at.session_state["p3_grade"].id == last_grade[1].id
+
+
+def test_view_button_on_a_previously_graded_submission_does_not_raise(tmp_path, monkeypatch):
+    # Bug: the "View" button's handler called active_selection.load_active_from_db
+    # with a bare name `store` that this function never defined (only
+    # `p2_store` was a parameter) -- a NameError on every click, in a
+    # try/except-free path that would have surfaced as a raw traceback.
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'app.db'}")
+    from streamlit.testing.v1 import AppTest
+
+    at = AppTest.from_file(APP_PATH)
+    at.run()
+    at.text_area[0].set_value("HW\n\nProblem A (5 points): Solve for x: 2x + 6 = 10.").run()
+    next(b for b in at.button if b.label == "Ingest assignment").click().run()
+    next(b for b in at.button if b.label.startswith("Develop solution for")).click().run(timeout=30)
+    next(b for b in at.button if b.label == "Approve solution").click().run()
+    next(b for b in at.button if b.label == "Draft rubric").click().run(timeout=30)
+    next(b for b in at.button if b.label == "Approve rubric").click().run()
+
+    for final in ("x = 2", "x = 999"):
+        next(ta for ta in at.text_area if ta.label == "...or paste the submission text directly").set_value(
+            f"Problem A\nFinal answer: {final}"
+        ).run(timeout=30)
+        next(b for b in at.button if b.label == "Ingest & grade submission").click().run(timeout=30)
+
+    view_buttons = [b for b in at.button if b.label == "View"]
+    assert len(view_buttons) == 2
+    view_buttons[0].click().run()
+
+    assert not at.exception
+    # And the click actually did its job: some submission is now active.
+    assert at.session_state["last_grade"] is not None

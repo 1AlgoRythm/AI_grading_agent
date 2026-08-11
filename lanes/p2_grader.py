@@ -39,7 +39,12 @@ def format_rubric_criteria(criteria: list[RubricCriterion]) -> str:
     return "\n".join(lines)
 
 
-def build_grader_prompt(context: GradingContext, tool_matched: Optional[bool], critique: Optional[str] = None) -> str:
+def build_grader_prompt(
+    context: GradingContext,
+    tool_matched: Optional[bool],
+    critique: Optional[str] = None,
+    previous: Optional["GraderResult"] = None,
+) -> str:
     observation = {
         True: "CONFIRMED correct by the verification tool. Treat this as ground truth.",
         False: "CONTRADICTED by the verification tool. Treat this as ground truth.",
@@ -72,11 +77,27 @@ def build_grader_prompt(context: GradingContext, tool_matched: Optional[bool], c
         "<short string tracing your reasoning>}."
     )
     if critique:
+        if previous is not None:
+            # Without this, the grader re-derives from scratch with no
+            # visible referent for "revise your grade" -- it often reaches
+            # the same number by the same route, and the critic objects
+            # again. Memory here is scoped to this one problem's revision
+            # round only, discarded afterward -- never across problems or
+            # submissions, which would be anchoring bias and would break
+            # the audit trail's reproducibility guarantee.
+            prompt += (
+                "\n\nYOUR PREVIOUS PROPOSAL ON THIS SAME PROBLEM:\n"
+                f"  points_awarded = {previous.points_awarded}\n"
+                f"  evidence = {previous.evidence!r}\n"
+                f"  partial_credit_reason = {previous.partial_credit_reason!r}\n"
+            )
         prompt += (
-            "\n\nAn independent critic reviewed your last proposed grade and "
+            "\nAn independent critic reviewed that proposed grade and "
             f"disagreed with this critique: {critique!r}\n"
-            "Re-examine the shown work against the rubric's failure signals "
-            "and revise your grade if the critique is warranted."
+            "Re-examine the shown work against the rubric's failure signals. "
+            "Either revise the score, or keep it and justify it more "
+            "specifically by citing the shown work -- do not restate your "
+            "previous justification unchanged."
         )
     return prompt
 
@@ -203,15 +224,22 @@ def _offline_fallback(context: GradingContext, tool_matched: Optional[bool], cri
     )
 
 
-def run_grader(context: GradingContext, tool_matched: Optional[bool], critique: Optional[str] = None) -> GraderResult:
-    """Run one grader pass. Pass `critique` on the single bounded revision round.
+def run_grader(
+    context: GradingContext,
+    tool_matched: Optional[bool],
+    critique: Optional[str] = None,
+    previous: Optional[GraderResult] = None,
+) -> GraderResult:
+    """Run one grader pass. Pass `critique` (and, on the revision round,
+    `previous` -- the grader's own prior proposal) on the single bounded
+    revision round.
 
     Deterministic (temperature=0.0): the grader should give the same score
     for the same submission on repeated runs (plan §13, "reliability" is a
     tracked evaluation signal) -- the critic (p2_critic.py) deliberately runs
     hotter so it isn't just replaying the grader's own reasoning.
     """
-    prompt = build_grader_prompt(context, tool_matched, critique)
+    prompt = build_grader_prompt(context, tool_matched, critique, previous)
     raw = call_model_json(prompt, max_tokens=768, temperature=0.0)
     result = _parse_response(raw, context.points_possible)
     if result is not None:
