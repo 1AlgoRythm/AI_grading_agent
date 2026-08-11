@@ -29,7 +29,12 @@ Run with: ``streamlit run app.py``
 """
 from __future__ import annotations
 
+import hashlib
+import hmac
 import os
+import secrets
+import time
+from typing import Optional
 
 import streamlit as st
 
@@ -47,6 +52,87 @@ INSTRUCTOR_PAGES = {
 STUDENT_PAGES = {
     "Student Feedback Chat": student_app.render,
 }
+
+# --------------------------------------------------------------------------- #
+# Cookie-based session persistence
+# --------------------------------------------------------------------------- #
+#
+# st.session_state resets on every browser refresh (it's tied to the
+# WebSocket connection, not the browser tab), which bounced a logged-in
+# user back to the login screen on every reload. The cookie carries a
+# signed, expiring token (email + expiry + HMAC) -- never the password or a
+# raw user object -- and on restore the email is re-looked-up through
+# UserStore fresh from the DB, so a forged, expired, or stale cookie can't
+# grant access to an account that doesn't check out right now. Restoring
+# only ever repopulates st.session_state["user"]; every existing
+# status/role gate below still runs exactly as it does after a fresh login.
+#
+# Built on Streamlit's own native st.context.cookies (read) and a two-line
+# injected script (write) instead of a third-party cookie-manager
+# component: those wrap a JS<->Python round trip that needs a `.ready()`/
+# `st.stop()` gate on first render and are prone to breaking across
+# Streamlit versions -- a native, dependency-free approach can't hang on
+# load the way a mismatched component version can.
+_SESSION_COOKIE_NAME = "grading_agent_session"
+_SESSION_TTL_SECONDS = 12 * 60 * 60  # 12 hours
+# Falls back to a per-process random secret when unset -- cookies won't
+# survive an actual server restart in that case, but still survive a page
+# refresh within one running process, which is the actual goal here. Set
+# SESSION_SECRET in a real deployment for persistence across restarts too.
+_SESSION_SECRET = os.getenv("SESSION_SECRET") or secrets.token_hex(32)
+
+
+def _make_session_token(email: str) -> str:
+    expiry = int(time.time()) + _SESSION_TTL_SECONDS
+    payload = f"{email}:{expiry}"
+    signature = hmac.new(_SESSION_SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
+    return f"{payload}:{signature}"
+
+
+def _email_from_session_token(token: str) -> Optional[str]:
+    try:
+        email, expiry_str, signature = token.split(":", 2)
+        expiry = int(expiry_str)
+    except (ValueError, AttributeError):
+        return None
+    if expiry < time.time():
+        return None
+    expected = hmac.new(_SESSION_SECRET.encode(), f"{email}:{expiry_str}".encode(), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(expected, signature):
+        return None
+    return email
+
+
+def _restore_user_from_cookie(store: UserStore) -> Optional[User]:
+    try:
+        token = st.context.cookies.get(_SESSION_COOKIE_NAME)
+    except Exception:
+        return None
+    if not token:
+        return None
+    email = _email_from_session_token(token)
+    if email is None:
+        return None
+    try:
+        return store.get_user_by_email(email)
+    except Exception:
+        return None
+
+
+def _set_session_cookie(email: str) -> None:
+    token = _make_session_token(email)
+    st.components.v1.html(
+        f"<script>document.cookie=\"{_SESSION_COOKIE_NAME}={token}; path=/; "
+        f"max-age={_SESSION_TTL_SECONDS}; SameSite=Lax\";</script>",
+        height=0, width=0,
+    )
+
+
+def _clear_session_cookie() -> None:
+    st.components.v1.html(
+        f"<script>document.cookie=\"{_SESSION_COOKIE_NAME}=; path=/; max-age=0\";</script>",
+        height=0, width=0,
+    )
 
 
 def _get_auth_store() -> UserStore:
@@ -80,6 +166,7 @@ def _render_login(store: UserStore) -> None:
                     st.error("Incorrect email or password.")
                 else:
                     st.session_state.user = user
+                    _set_session_cookie(user.email)
                     st.rerun()
     else:
         st.subheader("Register")
@@ -136,6 +223,10 @@ def main() -> None:
 
     user: User | None = st.session_state.get("user")
     if user is None:
+        user = _restore_user_from_cookie(store)
+        if user is not None:
+            st.session_state.user = user
+    if user is None:
         _render_login(store)
         return
 
@@ -144,6 +235,7 @@ def main() -> None:
         st.caption(f"Signed in as {user.display_name} ({user.role})")
         if st.button("Log out"):
             del st.session_state["user"]
+            _clear_session_cookie()
             st.rerun()
         st.divider()
 
