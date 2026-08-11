@@ -16,6 +16,7 @@ import os
 import streamlit as st
 
 from contracts import ArtifactStatus
+from lanes.p1_rag import retrieve_method_from_textbook
 from lanes.p1_storage import P1Store
 from lanes.p2_storage import P2Store
 from lanes.p3_feedback import answer_followup, feedback_history, register_feedback_context
@@ -82,7 +83,12 @@ def render() -> None:
             st.write(past_answer)
 
     if question := st.chat_input("e.g. why did I lose a point on Q2?"):
-        answer_followup(question, grade.submission_id)
+        # Retrieved per-question (not reusing whatever was retrieved for the
+        # original rubric) -- a follow-up like "why does substitution work
+        # here" can legitimately point at different course material than
+        # the problem statement did.
+        snippet = retrieve_method_from_textbook(question)
+        answer_followup(question, grade.submission_id, method_context=snippet)
         st.rerun()
 
 

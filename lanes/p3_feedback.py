@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from typing import Optional
 from uuid import UUID
 
 from contracts import Assignment, Grade, ProblemGrade, ProblemOutcome, Rubric, problem_label_map
@@ -184,10 +185,21 @@ def _grounding_block(context: FeedbackContext) -> str:
     return "\n".join(lines).strip()
 
 
-def answer_followup(question: str, submission_id: UUID) -> str:
+def answer_followup(question: str, submission_id: UUID, method_context: Optional[str] = None) -> str:
     """Answer a student's follow-up, grounded in the recorded grade, the
     approved solution and rubric (when registered with an assignment), and
     the conversation so far.
+
+    `method_context` is optional (defaulted to None so every existing
+    caller is unaffected) -- a textbook snippet the CALLER already
+    retrieved (e.g. via lanes/p1_rag.py's retrieve_method_from_textbook,
+    queried on the student's actual question). Retrieval intentionally does
+    not happen in here: every other lane function that consumes retrieved
+    material (develop_solution, draft_rubric) receives it as a parameter
+    rather than fetching it itself, and calling a chroma-backed lookup
+    inside a "pure" answer function would make every test here silently
+    depend on and cold-start against whatever happens to be in the real
+    textbook/ folder.
 
     Fails closed: with no registered context, this returns the "not
     available yet" message without ever calling the model.
@@ -221,6 +233,22 @@ def answer_followup(question: str, submission_id: UUID) -> str:
         "recorded evidence -- use it rather than saying that's not covered. "
         "Never change a score; scores are set by the instructor, not by "
         "this chat.\n\n"
+    )
+    if method_context:
+        # Grounding, not copy-paste, same as p1_solution.py's solution/
+        # rubric prompts: a coarse relevance-gated match against the
+        # question, not guaranteed to actually fit -- must be ignorable, and
+        # even when relevant must never be quoted verbatim into what the
+        # student reads. Scoped to conceptual explanation only; it never
+        # supersedes the recorded grading evidence above.
+        prompt += (
+            f"Course material retrieved as reference grounding for this question:\n{method_context}\n"
+            "Use it only if it is actually relevant to explaining the concept the "
+            "student is asking about; if it is not relevant, ignore it entirely. "
+            "Never quote or copy this material verbatim -- explain in your own "
+            "words. It never changes the recorded score or evidence above.\n\n"
+        )
+    prompt += (
         f"=== Recorded grading evidence for this submission ===\n{_grounding_block(context)}\n"
         f"{transcript}\n"
         f"Student question: {question}"

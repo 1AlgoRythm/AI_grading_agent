@@ -132,6 +132,48 @@ def test_followup_grounded_with_an_assignment_can_answer_how_it_should_have_been
     assert "Expand and simplify" in calls["prompt"]  # q2.statement, whitespace-normalized by _clean
 
 
+def test_followup_with_a_textbook_snippet_instructs_grounding_not_copying(monkeypatch):
+    # Grounding, not copy-paste, same principle as p1_solution.py's
+    # solution/rubric prompts: retrieval is the caller's job (student_app.py
+    # retrieves per-question and passes the result in), answer_followup just
+    # has to hand it to the model with the "use if relevant, ignore if not,
+    # never copy" instruction -- and never drop the pre-existing
+    # can't-freelance instruction for the recorded grade itself.
+    clear_feedback_contexts()
+    register_feedback_context(f.sample_grade(), f.sample_rubric())
+    calls = {}
+
+    def fake_call_model(prompt, max_tokens=512):
+        calls["prompt"] = prompt
+        return "An answer."
+
+    monkeypatch.setattr(p3_feedback, "call_model", fake_call_model)
+
+    answer_followup(
+        "Why does substitution work here?", f.SID,
+        method_context="Substitution replaces a variable with an equivalent expression.",
+    )
+
+    prompt = calls["prompt"]
+    assert "Substitution replaces a variable with an equivalent expression." in prompt
+    assert "ignore it entirely" in prompt.lower()
+    assert "never quote or copy" in prompt.lower()
+    assert "ONLY the recorded grading evidence" in prompt  # unweakened by the addition
+
+
+def test_followup_without_a_textbook_snippet_omits_the_grounding_block(monkeypatch):
+    # method_context defaults to None -- every existing caller (and every
+    # other test in this file) must see no textbook-grounding section at all.
+    clear_feedback_contexts()
+    register_feedback_context(f.sample_grade(), f.sample_rubric())
+    calls = {}
+    monkeypatch.setattr(p3_feedback, "call_model", lambda prompt, max_tokens=512: calls.setdefault("prompt", prompt) or "ok")
+
+    answer_followup("Why did I lose points on Q2?", f.SID)
+
+    assert "Course material retrieved" not in calls["prompt"]
+
+
 def test_followup_remembers_earlier_turns_in_the_same_conversation(monkeypatch):
     # Fix: every call used to build a fresh prompt with no conversation
     # memory -- "explain that more simply" has no referent without it.
