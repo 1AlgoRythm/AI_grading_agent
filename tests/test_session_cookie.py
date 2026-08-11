@@ -131,3 +131,31 @@ def test_logging_in_and_logging_out_still_work_with_the_cookie_calls_wired_in(tm
 
     assert not at.exception
     assert any(t.label == "Password" for t in at.text_input)  # back to the login screen
+
+
+def test_pending_cookie_write_is_consumed_within_one_interaction_not_left_dangling(tmp_path, monkeypatch):
+    # The actual _set_session_cookie/_clear_session_cookie calls are
+    # deferred a run past the login/logout click (see the comments in
+    # app.py's main() and _render_login) so the injected iframe isn't torn
+    # down by the immediate st.rerun() before the browser can mount it.
+    # AppTest.run() follows through that one rerun automatically, so by the
+    # time it returns, the pending flag must already be consumed -- if it
+    # were left set, the cookie write would never actually happen (it's
+    # only ever drained at the top of main()).
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'app.db'}")
+
+    from streamlit.testing.v1 import AppTest
+
+    at = AppTest.from_file(APP_PATH)
+    at.run()
+    at.text_input(key="login-email").set_value(_ADMIN_EMAIL).run()
+    at.text_input(key="login-password").set_value(_ADMIN_PASSWORD).run()
+    at.button(key="login-submit").click().run()
+
+    assert not at.exception
+    assert "_pending_set_cookie_email" not in at.session_state
+
+    next(b for b in at.button if b.label == "Log out").click().run()
+
+    assert not at.exception
+    assert "_pending_clear_cookie" not in at.session_state

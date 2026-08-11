@@ -166,7 +166,16 @@ def _render_login(store: UserStore) -> None:
                     st.error("Incorrect email or password.")
                 else:
                     st.session_state.user = user
-                    _set_session_cookie(user.email)
+                    # Deferred to the NEXT run (see main()), not called here
+                    # directly: st.rerun() immediately below tears down this
+                    # script run, and there's no guarantee the frontend gets
+                    # to mount the injected iframe (and so execute its
+                    # document.cookie script) before that happens -- the
+                    # exact "component doesn't survive an immediate rerun"
+                    # timing hazard, just on the write path instead of a
+                    # `.ready()` gate. Setting it on the following run (which
+                    # doesn't itself immediately rerun) removes the race.
+                    st.session_state["_pending_set_cookie_email"] = user.email
                     st.rerun()
     else:
         st.subheader("Register")
@@ -221,6 +230,17 @@ def main() -> None:
     st.set_page_config(page_title="AI Grading Agent", layout="wide")
     store = _get_auth_store()
 
+    # Run any cookie write deferred from a previous, now-completed run --
+    # see the comments at the two call sites below (_render_login's login
+    # branch and the logout button) for why this can't happen inline right
+    # before an st.rerun(). This run doesn't rerun again immediately after,
+    # so the injected iframe actually gets a chance to mount and execute.
+    pending_email = st.session_state.pop("_pending_set_cookie_email", None)
+    if pending_email is not None:
+        _set_session_cookie(pending_email)
+    if st.session_state.pop("_pending_clear_cookie", False):
+        _clear_session_cookie()
+
     user: User | None = st.session_state.get("user")
     if user is None:
         user = _restore_user_from_cookie(store)
@@ -235,7 +255,9 @@ def main() -> None:
         st.caption(f"Signed in as {user.display_name} ({user.role})")
         if st.button("Log out"):
             del st.session_state["user"]
-            _clear_session_cookie()
+            # Deferred to the next run -- see the matching comment on the
+            # login path above for why.
+            st.session_state["_pending_clear_cookie"] = True
             st.rerun()
         st.divider()
 
