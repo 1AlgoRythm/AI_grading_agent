@@ -202,19 +202,36 @@ def test_two_students_each_see_only_their_own_grade_never_the_others(tmp_path, m
     assert course_store.submissions_for_student(amy_id) == [str(amy_submission_id)]
     assert course_store.submissions_for_student(ben_id) == [str(ben_submission_id)]
 
+    # Approve only Amy's grade -- directly through P2Store, not the P3
+    # review UI's "Approve final grade" button: that button correctly
+    # refuses to approve a grade the critic escalated (a separate, real
+    # business rule, unrelated to what this test is proving), and whether
+    # amy's answer gets escalated is grading-pipeline behavior this test
+    # has no business depending on. The point here is the student portal's
+    # privacy scoping, not the P3 approval workflow (covered elsewhere).
+    p2_store = P2Store(db_url)
+    amy_grade = p2_store.grades_for_submission(amy_submission_id)[0]
+    amy_grade.approver_id = "instructor_1"
+    amy_grade.status = ArtifactStatus.APPROVED
+    p2_store.save(amy_grade, p2_store.get_trace(amy_grade.id))
+
     # UI-level proof: a *fresh* login session per student (rather than
     # logout/relogin inside the same AppTest instance -- AppTest's element
     # tree retains stale keyed widgets from the pre-login screen across
     # that many persona switches in one session and chokes gathering their
-    # widget state, an AppTest quirk unrelated to app correctness) shows
-    # their portal offers exactly one submission -- their own, never the
-    # other's.
+    # widget state, an AppTest quirk unrelated to app correctness).
     at_amy = AppTest.from_file(APP_PATH)
     at_amy.run()
     _login(at_amy, "amy@uni.edu", "pw12345")
-    assert len(at_amy.selectbox[0].options) == 1
+    assert not at_amy.exception
+    assert [h.value for h in at_amy.header] == ["Physics"]
+    assert any("graded" in c.value.lower() and "awaiting" not in c.value.lower() for c in at_amy.caption)
+    assert len(at_amy.metric) == 1  # her own score, and nothing else
 
     at_ben = AppTest.from_file(APP_PATH)
     at_ben.run()
     _login(at_ben, "ben@uni.edu", "pw12345")
-    assert len(at_ben.selectbox[0].options) == 1
+    assert not at_ben.exception
+    assert [h.value for h in at_ben.header] == ["Physics"]
+    assert any("awaiting grade" in c.value.lower() for c in at_ben.caption)
+    assert len(at_ben.metric) == 0  # never sees a score -- not Amy's, not even his own yet

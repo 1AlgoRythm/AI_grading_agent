@@ -9,7 +9,7 @@ from uuid import UUID
 
 from contracts import Assignment, Grade, ProblemGrade, ProblemOutcome, Rubric, problem_label_map
 from lanes.p3_review import finalize
-from model_provider import call_model
+from model_provider import _stub_response, call_model
 
 __all__ = [
     "answer_followup",
@@ -156,8 +156,21 @@ def clear_feedback_contexts() -> None:
 
 def _grounding_block(context: FeedbackContext) -> str:
     """The same material that produced the grade: statement, approved
-    reference, rubric criteria, and the recorded score/evidence."""
-    feedback = generate_feedback(context.grade, context.rubric)
+    reference, rubric criteria, and the recorded score/evidence.
+
+    Bug #3: `generate_feedback` raises ValueError if the grade and rubric
+    it's given don't share an assignment_id. `register_feedback_context`
+    already validates that invariant once, at registration time, but a
+    chat turn calling this again on every single question must never take
+    the whole conversation down over a mismatch that doesn't even bear on
+    the student's actual question -- degrade to the grounding material that
+    doesn't depend on it (statement, reference, rubric criteria) instead of
+    raising.
+    """
+    try:
+        feedback = generate_feedback(context.grade, context.rubric)
+    except ValueError:
+        feedback = {}
     problems = {p.id: p for p in (context.assignment.problems if context.assignment else [])}
 
     lines: list[str] = []
@@ -180,7 +193,8 @@ def _grounding_block(context: FeedbackContext) -> str:
             if description:
                 lines.append(f"Rubric — {name} ({points} pts): {description}")
 
-        lines.append(f"Grade recorded: {feedback[item.problem_id]}")
+        recorded = feedback.get(item.problem_id, "not available (grade/rubric context could not be verified)")
+        lines.append(f"Grade recorded: {recorded}")
         lines.append("")
     return "\n".join(lines).strip()
 
@@ -254,6 +268,23 @@ def answer_followup(question: str, submission_id: UUID, method_context: Optional
         f"Student question: {question}"
     )
     answer = call_model(prompt, max_tokens=500).strip()
+    if answer == _stub_response(prompt, 500).strip():
+        # Bug #2: call_model falls back to a deterministic offline stub on
+        # any failure (no model configured, a bad key, a provider outage)
+        # without raising -- silently recording that stub as if it were a
+        # real grounded answer would misinform the student that the model
+        # actually reasoned about their question. Detected by comparing
+        # against what the stub would independently produce for this exact
+        # prompt, rather than just checking "no model configured": a test
+        # (or a real caller) that monkeypatches/swaps call_model to
+        # simulate a working model must still have its answer trusted even
+        # though env vars are unset, and this check does that correctly --
+        # only the *literal* stub output gets caught.
+        answer = (
+            "I can't check that right now -- no grading model is configured, so "
+            "I can't generate a grounded answer. Please ask your instructor "
+            "directly, or try again once a model is configured."
+        )
     history.append((question, answer))
     del history[:-_MAX_STORED_TURNS]
     return answer
