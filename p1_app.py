@@ -391,6 +391,7 @@ def _render_submission_and_grading(p2_store: P2Store) -> None:
     build its budget-checked context, hand both to P2's grade(), and persist
     the result via P2Store -- so p2_app.py/p3_app.py can pick it straight up
     by assignment_id/submission_id, instead of only ever seeing fixtures."""
+    p1_store = _get_store()
     assignment = st.session_state.assignment
     rubric = st.session_state.rubric
     st.header("4. Upload a submission & grade it")
@@ -499,7 +500,7 @@ def _render_submission_and_grading(p2_store: P2Store) -> None:
                 # Makes this submission the active one everywhere (P2/P3
                 # follow), not just something you can read about here.
                 if st.button("View", key=f"view-hist-{g.id}"):
-                    reason = active_selection.load_active_from_db(assignment.id, g.submission_id, store, p2_store)
+                    reason = active_selection.load_active_from_db(assignment.id, g.submission_id, p1_store, p2_store)
                     if reason:
                         st.error(reason)
                     else:
