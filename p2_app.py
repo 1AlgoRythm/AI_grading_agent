@@ -31,6 +31,7 @@ from lanes import p2_grading as p2
 from lanes.p2_storage import P2Store
 from lanes.p3_review import override_problem_score
 from lanes.p3_storage import P3Store
+from session_cache import shared_grade
 
 STEP_ICONS = {
     StepKind.REASON: "🧠",
@@ -58,6 +59,7 @@ def _initialize_demo() -> None:
     last = st.session_state.get("last_grade")
     if last is not None:
         _, grade, trace = last
+        grade = shared_grade(grade)
         if st.session_state.get("p2_grade_id") != grade.id:
             st.session_state.p2_grade = grade
             st.session_state.p2_trace = trace
@@ -71,6 +73,7 @@ def _initialize_demo() -> None:
     rubric = fixtures.sample_rubric()
     context = fixtures.sample_submission_context()
     grade, trace = p2.grade(submission, rubric, context)
+    grade = shared_grade(grade)
     st.session_state.p2_store.save(grade, trace)
     st.session_state.p2_grade = grade
     st.session_state.p2_trace = trace

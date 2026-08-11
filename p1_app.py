@@ -32,6 +32,7 @@ from lanes import p2_grading as p2
 from lanes.p1_io import _read_pdf_text
 from lanes.p1_storage import P1Store
 from lanes.p2_storage import P2Store
+from session_cache import shared_grade
 
 
 def _write_uploaded_file(uploaded) -> str:
@@ -287,6 +288,7 @@ def _render_submission_and_grading(p2_store: P2Store) -> None:
             # with a raw traceback.
             st.error(f"Could not grade this submission: {exc}")
         else:
+            grade = shared_grade(grade)
             p2_store.save(grade, trace)
             st.session_state.last_grade = (submission, grade, trace)
             # Stashed alongside so p2_app/p3_app can pick this up from shared

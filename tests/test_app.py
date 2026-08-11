@@ -21,12 +21,11 @@ from pathlib import Path
 APP_PATH = str(Path(__file__).resolve().parent.parent / "app.py")
 
 
-def test_grading_on_the_upload_tab_is_immediately_visible_on_the_other_tabs(tmp_path, monkeypatch):
-    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'app.db'}")
-    from streamlit.testing.v1 import AppTest
-
-    at = AppTest.from_file(APP_PATH)
-    at.run()
+def _grade_one_simple_submission(at) -> None:
+    """Drive the "Upload & Rubric" tab through ingest -> solve -> rubric ->
+    grade for one trivial problem, ending with a graded submission in
+    st.session_state.last_grade. Shared by every test below that needs a
+    graded submission as its starting point."""
     assert at.sidebar.radio[0].value == "Upload & Rubric"
 
     at.text_area[0].set_value("HW Test\n\nProblem A (5 points): Solve for x: 2x + 6 = 10.").run()
@@ -52,6 +51,15 @@ def test_grading_on_the_upload_tab_is_immediately_visible_on_the_other_tabs(tmp_
     ).run()
     next(b for b in at.button if b.label == "Ingest & grade submission").click().run()
 
+
+def test_grading_on_the_upload_tab_is_immediately_visible_on_the_other_tabs(tmp_path, monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'app.db'}")
+    from streamlit.testing.v1 import AppTest
+
+    at = AppTest.from_file(APP_PATH)
+    at.run()
+    _grade_one_simple_submission(at)
+
     at.sidebar.radio[0].set_value("Grade & Trace").run()
     assert "5/5" in at.metric[0].value
 
@@ -62,6 +70,29 @@ def test_grading_on_the_upload_tab_is_immediately_visible_on_the_other_tabs(tmp_
     # And switching back doesn't blow up either.
     at.sidebar.radio[0].set_value("Upload & Rubric").run()
     assert any(b.label == "Ingest assignment" for b in at.button)
+
+
+def test_overriding_a_score_on_the_grade_tab_is_immediately_visible_on_review(tmp_path, monkeypatch):
+    """session_cache.shared_grade() is what makes this work: p2_app.py and
+    p3_app.py used to each hold their own independent copy of "the current
+    grade" once either one loaded from the database directly, so an override
+    made here wouldn't show up over there without a manual reload -- even
+    though the database itself was already correct."""
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'app.db'}")
+    from streamlit.testing.v1 import AppTest
+
+    at = AppTest.from_file(APP_PATH)
+    at.run()
+    _grade_one_simple_submission(at)
+
+    at.sidebar.radio[0].set_value("Grade & Trace").run()
+    at.number_input[0].set_value(5.0).run()
+    next(ti for ti in at.text_input if ti.label == "Reason for override").set_value("actually correct").run()
+    next(b for b in at.button if b.label == "Save override").click().run()
+    assert "5/5" in at.metric[0].value
+
+    at.sidebar.radio[0].set_value("Review & Feedback").run()
+    assert "5/5" in at.metric[0].value
 
 
 def test_no_byok_configured_shows_a_loud_sidebar_warning(tmp_path, monkeypatch):

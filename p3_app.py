@@ -17,6 +17,7 @@ from lanes.p3_evaluation import evaluate_runs
 from lanes.p3_feedback import answer_followup, generate_feedback, register_feedback_context
 from lanes.p3_review import finalize
 from lanes.p3_storage import P3Store
+from session_cache import shared_grade
 
 
 def _get_stores() -> tuple[P1Store, P2Store, P3Store]:
@@ -37,6 +38,10 @@ def _get_stores() -> tuple[P1Store, P2Store, P3Store]:
 
 
 def _load(grade, rubric, trace, assignment_id) -> None:
+    # Route through the shared cache: this is the only place p3_app.py picks
+    # up a grade (whether from last_grade, the DB picker below, or the demo
+    # fixtures), so this one call covers every entry point.
+    grade = shared_grade(grade)
     st.session_state.p3_grade = grade
     st.session_state.p3_rubric = rubric
     st.session_state.p3_trace = trace
