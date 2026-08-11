@@ -32,6 +32,8 @@ from lanes import active_selection
 from lanes import p1_ingestion as p1
 from lanes import p1_rag
 from lanes import p2_grading as p2
+from lanes.auth_storage import UserStore
+from lanes.course_storage import CourseStore
 from lanes.p1_io import _read_pdf_text
 from lanes.p1_storage import P1Store
 from lanes.p2_engine import grade_submission
@@ -103,6 +105,23 @@ def _get_p2_store() -> P2Store:
     if "p2_store" not in st.session_state:
         st.session_state.p2_store = P2Store(os.getenv("DATABASE_URL", "sqlite:///grading_demo.db"))
     return st.session_state.p2_store
+
+
+def _get_course_store() -> CourseStore:
+    if "course_store" not in st.session_state:
+        st.session_state.course_store = CourseStore(os.getenv("DATABASE_URL", "sqlite:///grading_demo.db"))
+    return st.session_state.course_store
+
+
+def _get_user_store() -> UserStore:
+    # app.py (the unified entry point) already creates this under the same
+    # session key before any lane's render() runs -- this only exists so
+    # p1_app.py keeps working when run standalone (`streamlit run
+    # p1_app.py`), the same fallback-creation pattern _get_store()/
+    # _get_p2_store() already use for their own stores.
+    if "auth_store" not in st.session_state:
+        st.session_state.auth_store = UserStore(os.getenv("DATABASE_URL", "sqlite:///grading_demo.db"))
+    return st.session_state.auth_store
 
 
 def _set_active_assignment_scope(assignment_id) -> None:
@@ -290,6 +309,61 @@ def _render_rubric_editor(store: P1Store) -> None:
             st.rerun()
 
 
+def _render_course_management(course_store: CourseStore, user) -> None:
+    """Stage 2 of the auth build (lanes/course_storage.py): thin, additive --
+    just enough to create a course, enroll a student by email, and link the
+    current assignment to a course. The student portal and any role-gating
+    of the main screens are later stages; this section only exists for the
+    instructor role, and only touches its own new tables."""
+    st.sidebar.header("Courses")
+
+    name = st.sidebar.text_input("New course name", key="new-course-name")
+    if st.sidebar.button("Create course", key="create-course"):
+        if not name.strip():
+            st.sidebar.error("Course name is required.")
+        else:
+            course_store.create_course(user.id, name)
+            st.sidebar.success(f"Created '{name}'.")
+            st.rerun()
+
+    courses = course_store.list_courses(instructor_id=user.id)
+    if not courses:
+        st.sidebar.caption("No courses yet -- create one above.")
+        return
+
+    course_options = {c.name: c for c in courses}
+    chosen_name = st.sidebar.selectbox("Course", list(course_options.keys()), key="course-picker")
+    course = course_options[chosen_name]
+
+    enroll_email = st.sidebar.text_input("Enroll student by email", key="enroll-email")
+    if st.sidebar.button("Enroll", key="enroll-submit"):
+        if not enroll_email.strip():
+            st.sidebar.error("Email is required.")
+        else:
+            course_store.enroll_student(course.id, enroll_email)
+            st.sidebar.success(f"Enrolled {enroll_email.strip().lower()}.")
+            st.rerun()
+
+    course_store.resolve_enrollment_ids(_get_user_store())
+    enrollments = course_store.list_enrollments(course.id)
+    if enrollments:
+        st.sidebar.caption("Enrolled:")
+        for e in enrollments:
+            resolved = " (registered)" if e.student_id else " (not yet registered)"
+            st.sidebar.caption(f"- {e.student_email}{resolved}")
+    else:
+        st.sidebar.caption("No students enrolled yet.")
+
+    if st.session_state.get("assignment") is not None:
+        assignment_id = str(st.session_state.assignment.id)
+        linked_course_id = course_store.course_for_assignment(assignment_id)
+        if linked_course_id == course.id:
+            st.sidebar.caption(f"Current assignment is linked to '{course.name}'.")
+        elif st.sidebar.button(f"Link current assignment to '{course.name}'", key="link-assignment-course"):
+            course_store.link_assignment_to_course(assignment_id, course.id)
+            st.rerun()
+
+
 def _activate_batch_row(assignment, submission, grade, trace, rubric) -> None:
     """Same mechanism p3_app.py's data-source picker uses to make a
     submission active everywhere (P2/P3 follow) -- reused here rather than
@@ -392,12 +466,39 @@ def _render_submission_and_grading(p2_store: P2Store) -> None:
     the result via P2Store -- so p2_app.py/p3_app.py can pick it straight up
     by assignment_id/submission_id, instead of only ever seeing fixtures."""
     p1_store = _get_store()
+    course_store = _get_course_store()
     assignment = st.session_state.assignment
     rubric = st.session_state.rubric
     st.header("4. Upload a submission & grade it")
     if rubric is None or rubric.status is not ArtifactStatus.APPROVED:
         st.info("Approve the rubric above before grading a submission.")
         return
+
+    # Stage 2 of the auth build: stamp student_id so ownership is
+    # unambiguous later, even when two students share a display name.
+    # - A student uploading owns their own submission outright.
+    # - An instructor may optionally assign a batch to one enrolled
+    #   student (picked from the course linked to this assignment, if
+    #   any); left unassigned (student_id=None) rather than guessing when
+    #   no course is linked, no one's enrolled, or nothing is picked.
+    user = st.session_state.get("user")
+    assign_student_id: Optional[str] = None
+    assign_student_label: Optional[str] = None
+    if user is not None and user.role == "student":
+        assign_student_id = user.id
+        assign_student_label = user.display_name
+    elif user is not None and user.role == "instructor":
+        linked_course_id = course_store.course_for_assignment(str(assignment.id))
+        if linked_course_id is not None:
+            course_store.resolve_enrollment_ids(_get_user_store())
+            enrollments = course_store.list_enrollments(linked_course_id)
+            if enrollments:
+                options = ["-- unassigned --"] + [e.student_email for e in enrollments]
+                choice = st.selectbox("Assign this submission to an enrolled student (optional)", options)
+                if choice != "-- unassigned --":
+                    chosen = next(e for e in enrollments if e.student_email == choice)
+                    assign_student_id = chosen.student_id
+                    assign_student_label = choice
 
     uploaded = st.file_uploader(
         "Submission file(s) (.txt, .md, .ipynb, .pdf)", type=["txt", "md", "ipynb", "pdf"],
@@ -420,7 +521,9 @@ def _render_submission_and_grading(p2_store: P2Store) -> None:
         ingest_errors: list[tuple[str, str]] = []
         for name, source in sources:
             try:
-                submission = p1.ingest_submission(source, assignment=assignment)
+                submission = p1.ingest_submission(source, assignment=assignment, student_id=assign_student_id)
+                if assign_student_id and assign_student_label:
+                    submission.student_label = assign_student_label
                 context = p1.build_submission_context(assignment, submission, rubric)
             except (ValueError, KeyError) as exc:
                 # Untrusted, free-form upload -- a parsing/mapping mismatch
@@ -444,9 +547,18 @@ def _render_submission_and_grading(p2_store: P2Store) -> None:
                 submissions, rubric, contexts,
                 grade_fn=partial(grade_submission, assignment_type=assignment.type),
             )
+            submissions_by_id = {s.id: s for s in submissions}
             for result in results:
                 if result.grade is not None and result.trace is not None:
                     p2_store.save(result.grade, result.trace)
+                    owner = submissions_by_id.get(result.submission_id)
+                    # Submissions aren't stored standalone anywhere -- this
+                    # is the durable link a later stage needs to resolve
+                    # "all grades belonging to student X" (lanes/course_storage.py).
+                    if owner is not None and owner.student_id:
+                        course_store.record_submission_owner(
+                            str(owner.id), owner.student_id, str(assignment.id),
+                        )
 
         st.session_state.batch_results = results
         st.session_state.batch_ingest_errors = ingest_errors
@@ -537,6 +649,14 @@ def render() -> None:
         if synced_count is not None:
             st.caption(f"Auto-synced: indexed {synced_count} chunk(s).")
         st.caption(f"{len(store.textbook_chunks())} chunk(s) currently indexed.")
+
+        # Stage 2 of the auth build: courses/enrollment are an instructor
+        # concern only. `user` is None when p1_app.py runs standalone
+        # (no login gate outside the unified app.py) -- no course UI shown
+        # there, exactly as before this stage existed.
+        user = st.session_state.get("user")
+        if user is not None and user.role == "instructor":
+            _render_course_management(_get_course_store(), user)
 
     _render_upload(store)
     if st.session_state.assignment is not None:

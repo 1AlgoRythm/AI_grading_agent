@@ -272,6 +272,13 @@ class Submission(BaseModel):
     student_label: str               # anonymizable handle, not a real name
     answers: list[SubmissionAnswer] = Field(default_factory=list)
     sanitized: bool = False          # set True once injection-scrubbed
+    # Stage 2 of the auth build (lanes/course_storage.py): the owning
+    # student's User.id, when known. Optional and defaulted to None so
+    # every existing caller, fixture, and test that builds a Submission
+    # without it keeps working unchanged -- unambiguous ownership even
+    # when two students share a display name, which student_label alone
+    # can't guarantee.
+    student_id: Optional[str] = None
 
     def answer_for(self, problem_id: UUID) -> Optional[SubmissionAnswer]:
         return next((a for a in self.answers if a.problem_id == problem_id), None)

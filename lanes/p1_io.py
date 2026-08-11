@@ -502,7 +502,9 @@ def _remap_answers_to_assignment(sub: Submission, assignment: Assignment) -> Non
     sub.answers = remapped
 
 
-def ingest_submission(source: str, assignment: Optional[Assignment] = None) -> Submission:
+def ingest_submission(
+    source: str, assignment: Optional[Assignment] = None, student_id: Optional[str] = None,
+) -> Submission:
     """Parse a student submission source into a structured `Submission`.
 
     Each parsed block becomes its own answer (not a fixed-size clone of the
@@ -512,34 +514,42 @@ def ingest_submission(source: str, assignment: Optional[Assignment] = None) -> S
     position) and `assignment_id` is set to the real assignment -- pass it
     whenever you have it. Without it, ids are placeholders the caller must
     remap once it knows which assignment the submission belongs to.
+
+    `student_id` (Stage 2 of the auth build) is optional and defaulted to
+    None so every existing caller is unaffected; when given, it's stamped
+    onto the returned Submission regardless of which internal path built
+    it, rather than threaded through each one separately.
     """
+    submission: Optional[Submission] = None
     text = _read_source_text(source)
     if text:
         if _model_configured():
-            llm_parsed = _build_llm_parsed_submission(source, text, assignment)
-            if llm_parsed is not None:
-                return llm_parsed
-        parsed = _build_parsed_submission(source, text, assignment)
-        if parsed is not None:
-            return parsed
+            submission = _build_llm_parsed_submission(source, text, assignment)
+        if submission is None:
+            submission = _build_parsed_submission(source, text, assignment)
 
-    # No real, parseable content -- fall back to a stand-in. Matched against
-    # the source's file stem only, never against submission prose: matching
-    # "sample" anywhere in a real student's pasted text (e.g. "for example",
-    # "sample size" in a stats problem) used to discard their actual
-    # submission and silently substitute the packaged fixture answers.
-    stem = Path(source).stem.lower() if source else ""
-    if "sample" in stem or "student_07" in stem:
-        sub = fixtures.sample_submission().model_copy(deep=True)
-    else:
-        sub = _template_submission()
+    if submission is None:
+        # No real, parseable content -- fall back to a stand-in. Matched
+        # against the source's file stem only, never against submission
+        # prose: matching "sample" anywhere in a real student's pasted text
+        # (e.g. "for example", "sample size" in a stats problem) used to
+        # discard their actual submission and silently substitute the
+        # packaged fixture answers.
+        stem = Path(source).stem.lower() if source else ""
+        if "sample" in stem or "student_07" in stem:
+            submission = fixtures.sample_submission().model_copy(deep=True)
+        else:
+            submission = _template_submission()
 
-    if assignment is not None:
-        sub.assignment_id = assignment.id
-        _remap_answers_to_assignment(sub, assignment)
-    for ans in sub.answers:
-        ans.work_text = _sanitize_text(ans.work_text or "")
-        if ans.final_answer:
-            ans.final_answer = _sanitize_text(ans.final_answer)
-    sub.sanitized = True
-    return sub
+        if assignment is not None:
+            submission.assignment_id = assignment.id
+            _remap_answers_to_assignment(submission, assignment)
+        for ans in submission.answers:
+            ans.work_text = _sanitize_text(ans.work_text or "")
+            if ans.final_answer:
+                ans.final_answer = _sanitize_text(ans.final_answer)
+        submission.sanitized = True
+
+    if student_id is not None:
+        submission.student_id = student_id
+    return submission
