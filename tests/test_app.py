@@ -49,7 +49,7 @@ def _grade_one_simple_submission(at) -> None:
     next(ta for ta in at.text_area if ta.label == "...or paste the submission text directly").set_value(
         "Problem A\nWork: 2x+6=10, x=2\nFinal answer: x = 2"
     ).run()
-    next(b for b in at.button if b.label == "Ingest & grade submission").click().run()
+    next(b for b in at.button if b.label == "Ingest & grade submission").click().run(timeout=30)
 
 
 def test_grading_on_the_upload_tab_is_immediately_visible_on_the_other_tabs(tmp_path, monkeypatch):
@@ -99,7 +99,7 @@ def test_the_same_problem_shows_the_same_label_on_every_screen(tmp_path, monkeyp
     next(ta for ta in at.text_area if ta.label == "...or paste the submission text directly").set_value(
         "Problem A\nFinal answer: x = 2\n\nProblem B\nFinal answer: x^2 + 2x + 1"
     ).run()
-    next(b for b in at.button if b.label == "Ingest & grade submission").click().run()
+    next(b for b in at.button if b.label == "Ingest & grade submission").click().run(timeout=30)
 
     at.sidebar.radio[0].set_value("Grade & Trace").run()
     p2_labels = {s.value for s in at.subheader}
@@ -159,7 +159,7 @@ def test_p2_follows_whichever_submission_p3s_picker_selects(tmp_path, monkeypatc
         next(ta for ta in at.text_area if ta.label == "...or paste the submission text directly").set_value(
             f"Problem A\nFinal answer: {final_answer}"
         ).run()
-        next(b for b in at.button if b.label == "Ingest & grade submission").click().run()
+        next(b for b in at.button if b.label == "Ingest & grade submission").click().run(timeout=30)
 
     grade_one("x = 2")  # student_farid
     farid_grade_id = at.session_state["last_grade"][1].id
@@ -188,3 +188,77 @@ def test_p2_follows_whichever_submission_p3s_picker_selects(tmp_path, monkeypatc
     # P2 must follow P3's pick -- this is the actual bug this change fixes.
     at.sidebar.radio[0].set_value("Grade & Trace").run()
     assert at.session_state["p2_grade"].id == farid_grade_id
+
+
+def test_batch_grading_table_sorts_errors_and_escalations_first_and_row_click_activates(tmp_path, monkeypatch):
+    """AppTest cannot simulate st.file_uploader at all, so this drives the
+    exact same real functions (p1.ingest_submission, p1.build_submission_context,
+    p2.grade_batch) p1_app.py's button handler calls, and injects the results
+    into session_state the same way it does -- exercising the real batch
+    ingestion/grading/error-handling/sorting/activation logic without a
+    widget AppTest structurally cannot click through. Row selection is
+    simulated by pre-seeding the dataframe widget's own selection state
+    under its key, the same way Streamlit restores any keyed widget's value
+    across a rerun."""
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'app.db'}")
+    from functools import partial
+
+    from streamlit.testing.v1 import AppTest
+    from lanes import p1_ingestion as p1
+    from lanes import p2_grading as p2
+    from lanes.p2_engine import grade_submission
+
+    at = AppTest.from_file(APP_PATH)
+    at.run()
+    at.text_area[0].set_value("HW5\n\nProblem A (5 points): Solve for x: 2x + 6 = 10.").run()
+    next(b for b in at.button if b.label == "Ingest assignment").click().run()
+    next(b for b in at.button if b.label.startswith("Develop solution for")).click().run(timeout=30)
+    next(b for b in at.button if b.label == "Approve solution").click().run()
+    next(b for b in at.button if b.label == "Draft rubric").click().run(timeout=30)
+    next(b for b in at.button if b.label == "Approve rubric").click().run()
+
+    assignment = at.session_state["assignment"]
+    rubric = at.session_state["rubric"]
+
+    submissions, contexts, ingest_errors = [], [], []
+    for name, text in {
+        "farid.txt": "Problem A\nFinal answer: x = 2",
+        "gita.txt": "Problem A\nFinal answer: x = 999",
+    }.items():
+        path = tmp_path / name
+        path.write_text(text)
+        submission = p1.ingest_submission(str(path), assignment=assignment)
+        context = p1.build_submission_context(assignment, submission, rubric)
+        submissions.append(submission)
+        contexts.append(context)
+    ingest_errors.append(("broken.txt", "simulated ingest failure"))
+
+    results = p2.grade_batch(
+        submissions, rubric, contexts, grade_fn=partial(grade_submission, assignment_type=assignment.type),
+    )
+    at.session_state["batch_results"] = results
+    at.session_state["batch_ingest_errors"] = ingest_errors
+    at.session_state["batch_submissions_by_id"] = {s.id: s for s in submissions}
+    at.session_state["batch_rubric"] = rubric
+    at.run()
+
+    table = at.dataframe[0].value
+    submission_names = list(table["Submission"])
+    assert submission_names[0] == "broken.txt"  # errors sort to the very top
+    assert "farid" in submission_names and "gita" in submission_names
+    assert not any(len(s) == 36 and s.count("-") == 4 for s in submission_names)  # never raw UUIDs
+
+    farid_row = next(i for i, s in enumerate(submission_names) if s == "farid")
+    at.session_state["batch_results_table"] = {"selection": {"rows": [farid_row], "columns": [], "cells": []}}
+    at.run()
+
+    last_grade = at.session_state["last_grade"]
+    assert last_grade[0].student_label == "farid"
+    assert at.session_state["active_submission_id"] == last_grade[0].id
+
+    # P2 and P3 must both follow the row-selected submission, via the exact
+    # same shared mechanism P3's own picker uses.
+    at.sidebar.radio[0].set_value("Grade & Trace").run()
+    assert at.session_state["p2_grade"].id == last_grade[1].id
+    at.sidebar.radio[0].set_value("Review & Feedback").run()
+    assert at.session_state["p3_grade"].id == last_grade[1].id
