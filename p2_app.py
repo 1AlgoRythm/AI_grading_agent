@@ -22,12 +22,14 @@ Run with: streamlit run p2_app.py
 from __future__ import annotations
 
 import os
+from uuid import UUID
 
 import streamlit as st
 
 import fixtures
-from contracts import ProblemOutcome, StepKind
+from contracts import ProblemOutcome, StepKind, problem_label_map
 from lanes import p2_grading as p2
+from lanes.p1_storage import P1Store
 from lanes.p2_storage import P2Store
 from lanes.p3_review import override_problem_score
 from lanes.p3_storage import P3Store
@@ -44,6 +46,8 @@ STEP_ICONS = {
 
 def _initialize_demo() -> None:
     db_url = os.getenv("DATABASE_URL", "sqlite:///grading_demo.db")
+    if "p1_store" not in st.session_state:
+        st.session_state.p1_store = P1Store(db_url)
     if "p2_store" not in st.session_state:
         st.session_state.p2_store = P2Store(db_url)
     if "audit_log" not in st.session_state:
@@ -80,7 +84,22 @@ def _initialize_demo() -> None:
     st.session_state.p2_grade_id = grade.id
 
 
-def _render_trace() -> None:
+def _step_problem_label(step, label_map: dict) -> str:
+    # The trace stores the full UUID string under "problem_id" (p2_engine.py
+    # is off-limits here -- this only changes how that already-stored value
+    # is displayed). Falls back to the hex tag stored under "problem" if the
+    # id is missing, unparseable, or not in this assignment's label map (a
+    # demo-fixture trace with no matching assignment in the DB, e.g.).
+    raw_id = step.data.get("problem_id")
+    if raw_id:
+        try:
+            return label_map[UUID(raw_id)]
+        except (ValueError, KeyError):
+            pass
+    return step.data.get("problem", "?")
+
+
+def _render_trace(label_map: dict) -> None:
     st.header("Grader + critic trace")
     trace = st.session_state.p2_trace
     st.caption(
@@ -92,16 +111,16 @@ def _render_trace() -> None:
         return
     for i, step in enumerate(trace.steps):
         icon = STEP_ICONS.get(step.type, "•")
-        label = f"{icon} {step.type} — problem {step.data.get('problem', '?')}"
+        label = f"{icon} {step.type} — problem {_step_problem_label(step, label_map)}"
         with st.expander(label, expanded=False):
             st.json(step.data)
 
 
-def _render_problem_panel(index: int) -> None:
+def _render_problem_panel(index: int, label_map: dict) -> None:
     grade = st.session_state.p2_grade
     problem_grade = grade.problem_grades[index]
 
-    st.subheader(f"Problem {problem_grade.problem_id.hex[-2:]}")
+    st.subheader(label_map.get(problem_grade.problem_id, problem_grade.problem_id.hex[-2:]))
     st.write(f"**Outcome:** {problem_grade.outcome.value}")
     st.write(f"**Proposed score:** {problem_grade.points_awarded:g}/{problem_grade.points_possible:g}")
     st.write(f"**Answer matched (tool-checked):** {problem_grade.answer_matched}")
@@ -142,6 +161,11 @@ def _render_problem_panel(index: int) -> None:
 def render() -> None:
     _initialize_demo()
     grade = st.session_state.p2_grade
+    # Best-effort: a demo-fixture grade has no matching row in the DB, so
+    # this stays {} and every display site below falls back to the hex tag
+    # -- never raises just because the assignment can't be loaded.
+    assignment = st.session_state.p1_store.load_assignment(grade.assignment_id)
+    label_map = problem_label_map(assignment) if assignment else {}
 
     st.title("AI Grading Agent")
     st.caption("P2 — grader + critic trace review and score override")
@@ -157,9 +181,9 @@ def render() -> None:
     with left:
         st.header("Grade panel")
         for index in range(len(grade.problem_grades)):
-            _render_problem_panel(index)
+            _render_problem_panel(index, label_map)
     with right:
-        _render_trace()
+        _render_trace(label_map)
 
 
 if __name__ == "__main__":

@@ -219,6 +219,12 @@ class Assignment(BaseModel):
         return v
 
 
+def problem_label_map(assignment: Assignment) -> dict[UUID, str]:
+    """Map each problem_id to its human label (e.g. 'Q1') in assignment order.
+    Single source of truth for how problems are numbered in every UI."""
+    return {p.id: p.label for p in assignment.problems}
+
+
 class RubricCriterion(BaseModel):
     model_config = _MODEL_CONFIG
 

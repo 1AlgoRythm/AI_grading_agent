@@ -72,6 +72,45 @@ def test_grading_on_the_upload_tab_is_immediately_visible_on_the_other_tabs(tmp_
     assert any(b.label == "Ingest assignment" for b in at.button)
 
 
+def test_the_same_problem_shows_the_same_label_on_every_screen(tmp_path, monkeypatch):
+    """contracts.problem_label_map() is the single source of truth here.
+    Before it existed, P2's problem panel and trace steps, and P3's grade
+    review and grounded feedback panel, all displayed a UUID hex fragment
+    (problem_id.hex[-2:]) instead of the assignment's own "Q1/Q2/Q3" label
+    -- meaningless to an instructor and inconsistent with P1, which already
+    showed the real label."""
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'app.db'}")
+    from streamlit.testing.v1 import AppTest
+
+    at = AppTest.from_file(APP_PATH)
+    at.run()
+    at.text_area[0].set_value(
+        "HW Test\n\n"
+        "Problem A (5 points): Solve for x: 2x + 6 = 10.\n\n"
+        "Problem B (5 points): Expand (x+1)^2."
+    ).run()
+    next(b for b in at.button if b.label == "Ingest assignment").click().run()
+    for b in [b for b in at.button if b.label.startswith("Develop solution for")]:
+        b.click().run(timeout=30)
+    for b in [b for b in at.button if b.label == "Approve solution"]:
+        b.click().run()
+    next(b for b in at.button if b.label == "Draft rubric").click().run(timeout=30)
+    next(b for b in at.button if b.label == "Approve rubric").click().run()
+    next(ta for ta in at.text_area if ta.label == "...or paste the submission text directly").set_value(
+        "Problem A\nFinal answer: x = 2\n\nProblem B\nFinal answer: x^2 + 2x + 1"
+    ).run()
+    next(b for b in at.button if b.label == "Ingest & grade submission").click().run()
+
+    at.sidebar.radio[0].set_value("Grade & Trace").run()
+    p2_labels = {s.value for s in at.subheader}
+    assert p2_labels == {"QA", "QB"}
+    assert all("QA" in e.label or "QB" in e.label for e in at.expander)
+
+    at.sidebar.radio[0].set_value("Review & Feedback").run()
+    p3_text = " ".join(m.value for m in at.markdown)
+    assert "QA" in p3_text and "QB" in p3_text
+
+
 def test_overriding_a_score_on_the_grade_tab_is_immediately_visible_on_review(tmp_path, monkeypatch):
     """session_cache.shared_grade() is what makes this work: p2_app.py and
     p3_app.py used to each hold their own independent copy of "the current

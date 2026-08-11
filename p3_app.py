@@ -10,7 +10,7 @@ import os
 import streamlit as st
 
 import fixtures
-from contracts import ArtifactStatus, ProblemOutcome
+from contracts import ArtifactStatus, ProblemOutcome, problem_label_map
 from lanes.p1_storage import P1Store
 from lanes.p2_storage import P2Store
 from lanes.p3_evaluation import evaluate_runs
@@ -105,13 +105,13 @@ def _initialize_demo() -> None:
     _load(fixtures.sample_grade(), fixtures.sample_rubric(), fixtures.sample_trace(), None)
 
 
-def _render_problem_review(index: int) -> None:
+def _render_problem_review(index: int, label_map: dict) -> None:
     # Score-only display -- overriding a score is a p2_app.py ("grade and
     # trace") action now, not this screen's. Keeping an override form here
     # too meant two places could edit the same grade with two separate
     # audit trails; this screen is read-only review + feedback + approval.
     problem_grade = st.session_state.p3_grade.problem_grades[index]
-    tag = problem_grade.problem_id.hex[-2:]
+    tag = label_map.get(problem_grade.problem_id, problem_grade.problem_id.hex[-2:])
     score = f"{problem_grade.points_awarded:g}/{problem_grade.points_possible:g}"
     if problem_grade.outcome is ProblemOutcome.NO_ANSWER:
         st.write(f"**Problem {tag}:** {score} (no answer submitted)")
@@ -127,6 +127,15 @@ def render() -> None:
     grade = st.session_state.p3_grade
     rubric = st.session_state.p3_rubric
 
+    p1_store, _, _ = _get_stores()
+    assignment_id = st.session_state.get("p3_assignment_id")
+    # Best-effort: a demo-fixture grade has no assignment_id (or none matching
+    # a real DB row), so this stays {} and every display site below falls
+    # back to the hex tag -- never raises just because the assignment can't
+    # be loaded.
+    assignment = p1_store.load_assignment(assignment_id) if assignment_id else None
+    label_map = problem_label_map(assignment) if assignment else {}
+
     st.title("AI Grading Agent")
     st.caption("P3 — grounded feedback, human review, audit, and evaluation")
     st.session_state.approver_id = st.text_input("Reviewer ID", value="instructor_1")
@@ -139,7 +148,7 @@ def render() -> None:
         if grade.escalated:
             st.warning("Escalated — resolve it with an override in the P2 grade-and-trace app, then approve here.")
         for index in range(len(grade.problem_grades)):
-            _render_problem_review(index)
+            _render_problem_review(index, label_map)
 
         if st.button(
             "Approve final grade",
@@ -159,7 +168,7 @@ def render() -> None:
     with right:
         st.header("Grounded feedback")
         for problem_id, text in generate_feedback(grade, rubric).items():
-            st.markdown(f"**Problem {problem_id.hex[-2:]}**")
+            st.markdown(f"**{label_map.get(problem_id, problem_id.hex[-2:])}**")
             st.write(text)
 
         st.header("Evaluation snapshot")
@@ -184,7 +193,7 @@ def render() -> None:
             st.caption("No overrides recorded.")
         for entry in audit_entries:
             st.write(
-                f"Problem {entry.problem_id.hex[-2:]}: "
+                f"Problem {label_map.get(entry.problem_id, entry.problem_id.hex[-2:])}: "
                 f"{entry.previous_points:g} → {entry.new_points:g} "
                 f"by {entry.approver_id} — {entry.reason}"
             )
