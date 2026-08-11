@@ -34,7 +34,6 @@ from contracts import (
     SubmissionAnswer,
     SubmissionContext,
     Trace,
-    now,
     rough_token_estimate,
 )
 

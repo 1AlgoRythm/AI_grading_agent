@@ -117,7 +117,6 @@ def test_a_mixed_assignment_routes_each_problem_to_its_own_verifier():
     # grade() would otherwise apply to every problem uniformly.
     math_problem_id = f.Q1
     proof_problem_id = f.Q2
-    assignment = f.sample_assignment()
     rubric = f.sample_rubric()
     submission = f.sample_submission()
     # Q2's answer becomes a (correct) proof instead of an algebra answer --

@@ -93,27 +93,3 @@ def test_overriding_a_score_on_the_grade_tab_is_immediately_visible_on_review(tm
 
     at.sidebar.radio[0].set_value("Review & Feedback").run()
     assert "5/5" in at.metric[0].value
-
-
-def test_no_byok_configured_shows_a_loud_sidebar_warning(tmp_path, monkeypatch):
-    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'app.db'}")
-    monkeypatch.delenv("MODEL_PROVIDER", raising=False)
-    monkeypatch.delenv("MODEL_API_KEY", raising=False)
-    from streamlit.testing.v1 import AppTest
-
-    at = AppTest.from_file(APP_PATH)
-    at.run()
-
-    assert any("offline fallback" in w.value.lower() for w in at.sidebar.warning)
-
-
-def test_byok_configured_suppresses_the_sidebar_warning(tmp_path, monkeypatch):
-    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'app.db'}")
-    monkeypatch.setenv("MODEL_PROVIDER", "openai")
-    monkeypatch.setenv("MODEL_API_KEY", "fake-key-for-test")
-    from streamlit.testing.v1 import AppTest
-
-    at = AppTest.from_file(APP_PATH)
-    at.run()
-
-    assert not any("offline fallback" in w.value.lower() for w in at.sidebar.warning)

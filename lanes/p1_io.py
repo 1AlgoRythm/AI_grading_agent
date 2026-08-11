@@ -16,14 +16,13 @@ can replace the file readers without changing the exported function names.
 from __future__ import annotations
 
 import json
-import os
 import re
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Optional
 from uuid import UUID
 
 import fixtures
-from contracts import ArtifactStatus, Assignment, Problem, SolutionSource, Submission, SubmissionAnswer, new_id
+from contracts import ArtifactStatus, Assignment, Problem, Submission, SubmissionAnswer, new_id
 
 __all__ = ["ingest_assignment", "ingest_submission"]
 
