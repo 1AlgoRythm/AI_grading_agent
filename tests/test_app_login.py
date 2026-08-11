@@ -53,7 +53,7 @@ def test_wrong_password_shows_a_clear_error_not_a_crash(tmp_path, monkeypatch):
     assert len(at.sidebar.radio) == 0  # still not let in
 
 
-def test_seeded_admin_can_log_in_and_sees_the_app_plus_the_admin_screen(tmp_path, monkeypatch):
+def test_seeded_admin_can_log_in_and_sees_only_the_admin_screen(tmp_path, monkeypatch):
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'app.db'}")
     from streamlit.testing.v1 import AppTest
 
@@ -62,10 +62,9 @@ def test_seeded_admin_can_log_in_and_sees_the_app_plus_the_admin_screen(tmp_path
     _login(at, _ADMIN_EMAIL, _ADMIN_PASSWORD)
 
     assert not at.exception
-    options = at.sidebar.radio[0].options
-    assert at.sidebar.radio[0].value == "Upload & Rubric"  # unchanged default, admin included
-    assert "Admin: Approvals" in options
-    assert options[-1] == "Admin: Approvals"  # appended, never displaces the existing default
+    # Stage 3: admin is gated to the approvals screen only -- no grading
+    # screens, exactly the "no grading screens needed" role-gating spec.
+    assert list(at.sidebar.radio[0].options) == ["Admin: Approvals"]
 
 
 def test_student_self_registers_active_and_can_log_in_immediately(tmp_path, monkeypatch):
@@ -81,8 +80,9 @@ def test_student_self_registers_active_and_can_log_in_immediately(tmp_path, monk
     _login(at, "stu@example.com", "pw12345")
 
     assert not at.exception
-    assert at.sidebar.radio[0].value == "Upload & Rubric"
-    assert "Admin: Approvals" not in at.sidebar.radio[0].options  # student, not admin
+    # Stage 3: a student is gated to their own portal only -- no instructor
+    # or admin screens on the sidebar at all.
+    assert list(at.sidebar.radio[0].options) == ["Student Feedback Chat"]
 
 
 def test_instructor_registration_is_pending_and_blocked_until_admin_approves(tmp_path, monkeypatch):

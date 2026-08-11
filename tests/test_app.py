@@ -21,15 +21,31 @@ from pathlib import Path
 APP_PATH = str(Path(__file__).resolve().parent.parent / "app.py")
 
 
-def _login_as_admin(at) -> None:
-    """app.py now gates every screen behind a login (lanes/auth_storage.py,
-    Stage 1 of the auth build) -- every test below that drives the app
-    through APP_PATH must log in first to reach the same screens it always
-    exercised. Admin (the seeded default account) sees every existing page
-    exactly as before login existed, so it's the right account for tests
-    that aren't specifically about the auth flow itself."""
+def _login_as_instructor(at) -> None:
+    """app.py gates every screen behind a login (lanes/auth_storage.py,
+    Stage 1), and Stage 3 additionally gates WHICH screens a role sees --
+    an admin now sees only the approvals screen, so it can no longer stand
+    in for "an account that can reach Upload & Rubric / Grade & Trace /
+    Review & Feedback" the way it could before Stage 3. Register, approve,
+    and log in as a real instructor instead; every test below that drives
+    the app through APP_PATH needs this to reach the same P1/P2/P3 screens
+    it always exercised."""
+    at.radio[0].set_value("Register").run()
+    at.selectbox(key="reg-role").select("instructor").run()
+    at.text_input(key="reg-name").set_value("Prof").run()
+    at.text_input(key="reg-email").set_value("prof@example.com").run()
+    at.text_input(key="reg-password").set_value("pw12345").run()
+    at.button(key="register-submit").click().run()
+    at.radio[0].set_value("Log in").run()
+
     at.text_input(key="login-email").set_value("admin@local").run()
     at.text_input(key="login-password").set_value("changeme123").run()
+    at.button(key="login-submit").click().run()
+    next(b for b in at.button if b.label == "Approve").click().run()
+    next(b for b in at.button if b.label == "Log out").click().run()
+
+    at.text_input(key="login-email").set_value("prof@example.com").run()
+    at.text_input(key="login-password").set_value("pw12345").run()
     at.button(key="login-submit").click().run()
 
 
@@ -70,7 +86,7 @@ def test_grading_on_the_upload_tab_is_immediately_visible_on_the_other_tabs(tmp_
 
     at = AppTest.from_file(APP_PATH)
     at.run()
-    _login_as_admin(at)
+    _login_as_instructor(at)
     _grade_one_simple_submission(at)
 
     at.sidebar.radio[0].set_value("Grade & Trace").run()
@@ -97,7 +113,7 @@ def test_the_same_problem_shows_the_same_label_on_every_screen(tmp_path, monkeyp
 
     at = AppTest.from_file(APP_PATH)
     at.run()
-    _login_as_admin(at)
+    _login_as_instructor(at)
     at.text_area[0].set_value(
         "HW Test\n\n"
         "Problem A (5 points): Solve for x: 2x + 6 = 10.\n\n"
@@ -136,7 +152,7 @@ def test_overriding_a_score_on_the_grade_tab_is_immediately_visible_on_review(tm
 
     at = AppTest.from_file(APP_PATH)
     at.run()
-    _login_as_admin(at)
+    _login_as_instructor(at)
     _grade_one_simple_submission(at)
 
     at.sidebar.radio[0].set_value("Grade & Trace").run()
@@ -163,7 +179,7 @@ def test_p2_follows_whichever_submission_p3s_picker_selects(tmp_path, monkeypatc
 
     at = AppTest.from_file(APP_PATH)
     at.run()
-    _login_as_admin(at)
+    _login_as_instructor(at)
     at.text_area[0].set_value("HW4\n\nProblem A (5 points): Solve for x: 2x + 6 = 10.").run()
     next(b for b in at.button if b.label == "Ingest assignment").click().run()
     next(b for b in at.button if b.label.startswith("Develop solution for")).click().run(timeout=30)
@@ -226,7 +242,7 @@ def test_batch_grading_table_sorts_errors_and_escalations_first_and_row_click_ac
 
     at = AppTest.from_file(APP_PATH)
     at.run()
-    _login_as_admin(at)
+    _login_as_instructor(at)
     at.text_area[0].set_value("HW5\n\nProblem A (5 points): Solve for x: 2x + 6 = 10.").run()
     next(b for b in at.button if b.label == "Ingest assignment").click().run()
     next(b for b in at.button if b.label.startswith("Develop solution for")).click().run(timeout=30)
@@ -291,7 +307,7 @@ def test_view_button_on_a_previously_graded_submission_does_not_raise(tmp_path, 
 
     at = AppTest.from_file(APP_PATH)
     at.run()
-    _login_as_admin(at)
+    _login_as_instructor(at)
     at.text_area[0].set_value("HW\n\nProblem A (5 points): Solve for x: 2x + 6 = 10.").run()
     next(b for b in at.button if b.label == "Ingest assignment").click().run()
     next(b for b in at.button if b.label.startswith("Develop solution for")).click().run(timeout=30)

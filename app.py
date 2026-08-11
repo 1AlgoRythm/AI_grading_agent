@@ -17,9 +17,13 @@ p3_app.py's use of them).
 Stage 1 of a multi-stage build added a login gate in front of all of this
 (lanes/auth_storage.py): three roles (admin/instructor/student), instructor
 registration requires admin approval before the portals below are reachable.
-Deliberately does not gate WHICH screens a role can see yet -- that's a later
-stage; for now, any active/approved user sees the exact same screens as
-before login existed.
+
+Stage 3 gates WHICH screens a role can see: an admin sees only the
+approvals screen, an instructor sees only the P1/P2/P3 grading screens, and
+a student sees only their own portal (student_app.py, itself scoped in
+Stage 3 to that student's own grades -- lanes/course_storage.py). Before
+this, every active/approved role saw every screen, which meant a student
+could open the instructor screens too.
 
 Run with: ``streamlit run app.py``
 """
@@ -35,10 +39,12 @@ import p3_app
 import student_app
 from lanes.auth_storage import User, UserStore
 
-PAGES = {
+INSTRUCTOR_PAGES = {
     "Upload & Rubric": p1_app.render,
     "Grade & Trace": p2_app.render,
     "Review & Feedback": p3_app.render,
+}
+STUDENT_PAGES = {
     "Student Feedback Chat": student_app.render,
 }
 
@@ -148,12 +154,12 @@ def main() -> None:
         st.error("Your instructor registration was rejected. Contact an admin.")
         return
 
-    pages = dict(PAGES)
     if user.role == "admin":
-        # Appended, not prepended -- the sidebar radio's first/default
-        # option must stay "Upload & Rubric" for every role, admin
-        # included, exactly as it was before login existed.
-        pages = {**pages, "Admin: Approvals": lambda: _render_admin_view(store)}
+        pages = {"Admin: Approvals": lambda: _render_admin_view(store)}
+    elif user.role == "instructor":
+        pages = dict(INSTRUCTOR_PAGES)
+    else:
+        pages = dict(STUDENT_PAGES)
 
     with st.sidebar:
         page = st.radio("Screen", list(pages.keys()))

@@ -475,19 +475,17 @@ def _render_submission_and_grading(p2_store: P2Store) -> None:
         return
 
     # Stage 2 of the auth build: stamp student_id so ownership is
-    # unambiguous later, even when two students share a display name.
-    # - A student uploading owns their own submission outright.
-    # - An instructor may optionally assign a batch to one enrolled
-    #   student (picked from the course linked to this assignment, if
-    #   any); left unassigned (student_id=None) rather than guessing when
-    #   no course is linked, no one's enrolled, or nothing is picked.
+    # unambiguous later, even when two students share a display name. This
+    # screen is instructor-only (Stage 3's role-gating in app.py never
+    # routes a student here), so the instructor may optionally assign a
+    # batch to one enrolled student (picked from the course linked to this
+    # assignment, if any); left unassigned (student_id=None) rather than
+    # guessing when no course is linked, no one's enrolled, or nothing is
+    # picked.
     user = st.session_state.get("user")
     assign_student_id: Optional[str] = None
     assign_student_label: Optional[str] = None
-    if user is not None and user.role == "student":
-        assign_student_id = user.id
-        assign_student_label = user.display_name
-    elif user is not None and user.role == "instructor":
+    if user is not None and user.role == "instructor":
         linked_course_id = course_store.course_for_assignment(str(assignment.id))
         if linked_course_id is not None:
             course_store.resolve_enrollment_ids(_get_user_store())

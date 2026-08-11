@@ -35,7 +35,9 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 from contracts import new_id, now
 
 if TYPE_CHECKING:
+    from contracts import Grade
     from lanes.auth_storage import UserStore
+    from lanes.p2_storage import P2Store
 
 __all__ = ["Course", "CourseStore", "Enrollment"]
 
@@ -251,3 +253,14 @@ class CourseStore:
             return list(session.scalars(
                 select(SubmissionOwnerRecord.submission_id).where(SubmissionOwnerRecord.student_id == student_id)
             ).all())
+
+    def grades_for_student(self, student_id: str, p2_store: "P2Store") -> list["Grade"]:
+        """Stage 3 of the auth build: the student portal's own lookup --
+        every graded submission this student owns, across every assignment.
+        Composes this store's ownership records with P2Store's own grade
+        lookup rather than duplicating grade storage here. Empty, never an
+        error, when the student owns nothing yet."""
+        grades = []
+        for submission_id in self.submissions_for_student(student_id):
+            grades.extend(p2_store.grades_for_submission(submission_id))
+        return grades

@@ -1,13 +1,19 @@
-"""Student-facing feedback chat.
+"""Student-facing portal: your own grades, feedback, rubric, and follow-up
+chat -- nothing else.
 
 Kept on its own screen rather than folded into p3_app.py: p3_app.py is the
 instructor's review/override/approve/audit surface (an earlier, explicit
-decision removed the chat from there for exactly that reason). This is the
-"separate student portal" that decision called for -- a student picks their
-graded submission and asks the follow-up chat why they lost a point, without
-seeing any instructor-only controls.
+decision removed the chat from there for exactly that reason).
 
-Run with: ``streamlit run student_app.py``
+Stage 3 of the auth build scopes this screen to the logged-in student's own
+data only (lanes/course_storage.py's ownership records via
+`grades_for_student`) -- it used to let anyone pick any assignment and then
+any graded submission for it, which is the privacy gap Stage 3 closes. A
+student with no owned submissions sees "no graded submissions yet," never
+another student's grade.
+
+Run with: ``streamlit run student_app.py`` (no login gate outside the
+unified app.py -- standalone runs with no logged-in user show nothing).
 """
 from __future__ import annotations
 
@@ -15,69 +21,86 @@ import os
 
 import streamlit as st
 
-from contracts import ArtifactStatus
+from contracts import ArtifactStatus, problem_label_map
+from lanes.course_storage import CourseStore
 from lanes.p1_rag import rehydrate_textbook_from_db, retrieve_method_from_textbook
 from lanes.p1_storage import P1Store
 from lanes.p2_storage import P2Store
-from lanes.p3_feedback import answer_followup, feedback_history, register_feedback_context
+from lanes.p3_feedback import answer_followup, feedback_history, generate_feedback, register_feedback_context
 
 
-def _get_stores() -> tuple[P1Store, P2Store]:
+def _get_stores() -> tuple[P1Store, P2Store, CourseStore]:
     db_url = os.getenv("DATABASE_URL", "sqlite:///grading_demo.db")
     if "p1_store" not in st.session_state:
         st.session_state.p1_store = P1Store(db_url)
     if "p2_store" not in st.session_state:
         st.session_state.p2_store = P2Store(db_url)
-    return st.session_state.p1_store, st.session_state.p2_store
+    if "course_store" not in st.session_state:
+        st.session_state.course_store = CourseStore(db_url)
+    return st.session_state.p1_store, st.session_state.p2_store, st.session_state.course_store
 
 
 def render() -> None:
     st.title("AI Grading Agent")
-    st.caption("Student feedback chat — ask why you lost a point on a graded submission")
+    st.caption("Your grades and feedback")
 
-    p1_store, p2_store = _get_stores()
-    # Defensive: p1_app.py's sidebar is the primary place this runs, but a
-    # fresh container could land here first (a no-op once textbook/ already
-    # has content, so cheap to check unconditionally).
+    p1_store, p2_store, course_store = _get_stores()
+    # Defensive: this could be the first screen to run in a fresh container
+    # (a no-op once textbook/ already has content, so cheap to check
+    # unconditionally).
     rehydrate_textbook_from_db(p1_store)
 
-    assignments = p1_store.list_assignments()
-    if not assignments:
-        st.info("No assignments in the shared database yet.")
+    user = st.session_state.get("user")
+    if user is None:
+        # Reached with no logged-in student -- e.g. a standalone
+        # `streamlit run student_app.py` outside app.py's login gate. Fail
+        # closed: there is no identity to scope grades to, so show nothing
+        # rather than guess or fall back to "everyone's grades."
+        st.error("You must be logged in as a student to view your grades.")
         return
 
-    assignment_options = {f"{a.label} ({len(a.problems)} problems)": a for a in assignments}
-    assignment_choice = st.selectbox("Assignment", ["-- choose --", *assignment_options.keys()])
-    if assignment_choice == "-- choose --":
-        return
-    assignment = assignment_options[assignment_choice]
-
-    grades = p2_store.grades_for_assignment(assignment.id)
+    grades = course_store.grades_for_student(user.id, p2_store)
     if not grades:
-        st.info("No graded submissions yet for this assignment.")
+        st.info("You have no graded submissions yet.")
         return
 
-    grade_options = {
-        f"Submission {g.submission_id.hex[-2:]} -- {g.total_awarded:g}/{g.total_possible:g}": g
-        for g in grades
-    }
-    grade_choice = st.selectbox("Your graded submission", list(grade_options.keys()))
-    grade = grade_options[grade_choice]
+    grade_options = {}
+    for g in grades:
+        assignment = p1_store.load_assignment(g.assignment_id)
+        label = assignment.label if assignment is not None else g.assignment_id.hex[-6:]
+        tag = "" if g.status is ArtifactStatus.APPROVED else " (awaiting grade)"
+        grade_options[f"{label} -- {g.total_awarded:g}/{g.total_possible:g}{tag}"] = g
+
+    choice = st.selectbox("Your submissions", list(grade_options.keys()))
+    grade = grade_options[choice]
 
     if grade.status is not ArtifactStatus.APPROVED:
         # The human-approval gate applies here too: a still-under-review
         # grade isn't final, so there's nothing settled yet to chat about.
-        st.info("This grade hasn't been finalized by your instructor yet -- check back after it's approved.")
+        st.info("Submitted -- awaiting your instructor's final grade.")
         return
 
-    rubric = p1_store.load_rubric_for_assignment(assignment.id)
-    if rubric is None:
-        st.error("No rubric found for this assignment -- ask your instructor.")
+    assignment = p1_store.load_assignment(grade.assignment_id)
+    rubric = p1_store.load_rubric_for_assignment(grade.assignment_id)
+    if assignment is None or rubric is None:
+        st.error("Could not load this submission's assignment/rubric -- ask your instructor.")
         return
 
     register_feedback_context(grade, rubric, assignment)
+    label_map = problem_label_map(assignment)
 
     st.metric("Total", f"{grade.total_awarded:g}/{grade.total_possible:g}")
+
+    st.subheader("Feedback")
+    for problem_id, text in generate_feedback(grade, rubric).items():
+        st.markdown(f"**{label_map.get(problem_id, str(problem_id)[-6:])}**")
+        st.write(text)
+
+    st.subheader("Rubric")
+    for criterion in rubric.criteria:
+        tag = label_map.get(criterion.problem_id, str(criterion.problem_id)[-6:])
+        st.write(f"- **{tag} / {criterion.name}** ({criterion.points:g} pts): {criterion.description}")
+
     st.divider()
 
     for past_question, past_answer in feedback_history(grade.submission_id):
@@ -97,5 +120,5 @@ def render() -> None:
 
 
 if __name__ == "__main__":
-    st.set_page_config(page_title="AI Grading Agent — Student Feedback Chat", layout="wide")
+    st.set_page_config(page_title="AI Grading Agent — Student Portal", layout="wide")
     render()
