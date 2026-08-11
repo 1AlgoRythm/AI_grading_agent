@@ -46,6 +46,12 @@ def test_app_dispatcher_offers_the_student_chat_as_its_own_screen(tmp_path, monk
 
     at = AppTest.from_file(APP_PATH)
     at.run()
+    # app.py now gates every screen behind a login (lanes/auth_storage.py) --
+    # log in as the seeded default admin to reach the sidebar radio at all.
+    at.text_input(key="login-email").set_value("admin@local").run()
+    at.text_input(key="login-password").set_value("changeme123").run()
+    at.button(key="login-submit").click().run()
+
     assert "Student Feedback Chat" in at.sidebar.radio[0].options
 
 
