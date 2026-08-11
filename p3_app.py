@@ -14,7 +14,7 @@ from contracts import ArtifactStatus, ProblemOutcome
 from lanes.p1_storage import P1Store
 from lanes.p2_storage import P2Store
 from lanes.p3_evaluation import evaluate_runs
-from lanes.p3_feedback import answer_followup, generate_feedback, register_feedback_context
+from lanes.p3_feedback import generate_feedback
 from lanes.p3_review import finalize
 from lanes.p3_storage import P3Store
 from session_cache import shared_grade
@@ -46,7 +46,6 @@ def _load(grade, rubric, trace, assignment_id) -> None:
     st.session_state.p3_rubric = rubric
     st.session_state.p3_trace = trace
     st.session_state.p3_assignment_id = assignment_id
-    st.session_state.chat = []
 
 
 def _render_data_source_picker() -> None:
@@ -122,19 +121,6 @@ def _render_problem_review(index: int) -> None:
         st.write(f"**Problem {tag}:** {score}")
 
 
-def _render_chat() -> None:
-    st.header("Student feedback chat")
-    register_feedback_context(st.session_state.p3_grade, st.session_state.p3_rubric)
-    for role, message in st.session_state.chat:
-        with st.chat_message(role):
-            st.write(message)
-    question = st.chat_input("Ask why points were awarded or deducted")
-    if question:
-        response = answer_followup(question, st.session_state.p3_grade.submission_id)
-        st.session_state.chat.extend((("user", question), ("assistant", response)))
-        st.rerun()
-
-
 def render() -> None:
     _initialize_demo()
     _render_data_source_picker()
@@ -202,8 +188,6 @@ def render() -> None:
                 f"{entry.previous_points:g} → {entry.new_points:g} "
                 f"by {entry.approver_id} — {entry.reason}"
             )
-
-    _render_chat()
 
 
 if __name__ == "__main__":
