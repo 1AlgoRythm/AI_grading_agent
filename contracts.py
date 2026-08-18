@@ -476,10 +476,6 @@ class GradingError(Exception):
     batch of 30. Retry/backoff belongs around ToolError/ModelError."""
 
 
-class ParseError(GradingError):
-    """Ingestion could not parse an assignment or submission."""
-
-
 class ToolError(GradingError):
     """A verification tool (e.g. SymPy) failed unexpectedly."""
 

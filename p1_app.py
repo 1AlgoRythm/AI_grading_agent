@@ -39,17 +39,7 @@ from lanes.p1_storage import P1Store
 from lanes.p2_engine import grade_submission
 from lanes.p2_storage import P2Store
 from session_cache import shared_grade
-
-
-def _write_uploaded_file(uploaded) -> str:
-    """Write an uploaded file to a temp path, preserving its original name
-    (mkdtemp + real filename) instead of NamedTemporaryFile's random name --
-    otherwise ingest_assignment/ingest_submission derive the label/student
-    handle from a meaningless "tmpXXXXXXXX" stem."""
-    tmp_dir = Path(tempfile.mkdtemp())
-    dest = tmp_dir / (uploaded.name or "upload.txt")
-    dest.write_bytes(uploaded.getvalue())
-    return str(dest)
+from upload_helpers import write_uploaded_file as _write_uploaded_file
 
 
 def _save_textbook_upload(uploaded) -> Path:

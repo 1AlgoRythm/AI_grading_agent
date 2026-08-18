@@ -17,8 +17,6 @@ unified app.py -- standalone runs with no logged-in user show nothing).
 from __future__ import annotations
 
 import os
-import tempfile
-from pathlib import Path
 from typing import Optional
 from uuid import UUID
 
@@ -33,6 +31,7 @@ from lanes.p1_storage import P1Store
 from lanes.p2_storage import P2Store
 from lanes.p3_feedback import answer_followup, feedback_history, generate_feedback, register_feedback_context
 from lanes.regrade_storage import RegradeStore
+from upload_helpers import write_uploaded_file as _write_uploaded_file
 
 
 def _get_stores() -> tuple[P1Store, P2Store, CourseStore, RegradeStore]:
@@ -49,17 +48,6 @@ def _get_stores() -> tuple[P1Store, P2Store, CourseStore, RegradeStore]:
         st.session_state.p1_store, st.session_state.p2_store,
         st.session_state.course_store, st.session_state.regrade_store,
     )
-
-
-def _write_uploaded_file(uploaded) -> str:
-    # Same approach p1_app.py's own upload handling uses: a real temp path
-    # with the original filename preserved (not NamedTemporaryFile's random
-    # name), since ingest_submission derives the student handle from the
-    # source's file stem.
-    tmp_dir = Path(tempfile.mkdtemp())
-    dest = tmp_dir / (uploaded.name or "upload.txt")
-    dest.write_bytes(uploaded.getvalue())
-    return str(dest)
 
 
 def _best_grade(grades: list[Grade]) -> Optional[Grade]:
